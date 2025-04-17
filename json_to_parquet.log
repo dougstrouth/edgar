@@ -1,0 +1,7 @@
+2025-04-16 23:24:48,855 - INFO - Current working directory: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/APIs/edgar
+2025-04-16 23:24:48,855 - INFO - Script directory: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/APIs/edgar
+2025-04-16 23:24:48,855 - INFO - Using DOWNLOAD_DIR: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads
+2025-04-16 23:24:48,855 - INFO - Using PARQUET_DIR: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/APIs/edgar/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_parquet_data
+2025-04-16 23:24:48,855 - INFO - --- Starting EDGAR JSON->Parquet Conversion Process ---
+2025-04-16 23:24:48,855 - ERROR - FATAL: SEC_USER_AGENT variable in the script must be updated.
+2025-04-16 23:24:48,855 - ERROR - Please set it to identify your application and provide a contact email.

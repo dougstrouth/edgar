@@ -49,7 +49,7 @@ except KeyError as e:
     sys.exit(1)
 
 # SEC requires a User-Agent header - **MUST BE SET BY USER**
-SEC_USER_AGENT = "YourCompanyName/YourAppName YourContactEmail@example.com" # CHANGE THIS!
+SEC_USER_AGENT = "EDGAR Research Project" # CHANGE THIS!
 
 DOWNLOAD_URLS = {
     "submissions": "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip",
