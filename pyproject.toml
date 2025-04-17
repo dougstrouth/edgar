@@ -1,0 +1,16 @@
+[project]
+name = "edgar"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "datetime>=5.5",
+    "dotenv>=0.9.9",
+    "duckdb>=1.2.2",
+    "logging>=0.4.9.6",
+    "pandas>=2.2.3",
+    "pyarrow>=19.0.1",
+    "requests>=2.32.3",
+    "tqdm>=4.67.1",
+]

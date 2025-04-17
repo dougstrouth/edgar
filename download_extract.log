@@ -1,0 +1,49 @@
+2025-04-16 23:00:38,969 - INFO - --- Starting EDGAR Bulk Data Download and Extraction ---
+2025-04-16 23:00:38,969 - INFO - Script execution started at: 2025-04-17T04:00:38.969385+00:00
+2025-04-16 23:00:38,969 - INFO - User context time (UTC): 2025-04-17T03:52:02+00:00
+2025-04-16 23:00:38,970 - WARNING - Please update the SEC_USER_AGENT variable in the script with your application name and contact email.
+2025-04-16 23:00:38,970 - INFO - Attempting to download https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/submissions.zip
+2025-04-16 23:01:04,225 - INFO - Successfully downloaded submissions.zip
+2025-04-16 23:01:05,229 - INFO - Attempting to download https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/companyfacts.zip
+2025-04-16 23:01:26,924 - INFO - Successfully downloaded companyfacts.zip
+2025-04-16 23:01:27,931 - INFO - Attempting to download https://www.sec.gov/files/company_tickers.json to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/company_tickers.json
+2025-04-16 23:01:28,229 - INFO - Successfully downloaded company_tickers.json
+2025-04-16 23:01:29,235 - INFO - Downloaded files: [PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/submissions.zip'), PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/companyfacts.zip'), PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/company_tickers.json')]
+2025-04-16 23:01:29,235 - INFO - Connecting to DuckDB database: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb
+2025-04-16 23:01:29,300 - INFO - Setting up database table 'extracted_files' in /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb
+2025-04-16 23:01:29,309 - INFO - Table 'extracted_files' created or already exists.
+2025-04-16 23:01:29,309 - INFO - Attempting to extract submissions.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_data_extracted
+2025-04-16 23:10:23,907 - INFO - --- Starting EDGAR Bulk Data Download and Extraction ---
+2025-04-16 23:10:23,908 - INFO - Script execution started at: 2025-04-17T04:10:23.907522+00:00
+2025-04-16 23:10:23,908 - INFO - User context time (UTC): 2025-04-17T03:52:02+00:00
+2025-04-16 23:10:23,909 - WARNING - Please update the SEC_USER_AGENT variable in the script with your application name and contact email.
+2025-04-16 23:10:23,909 - INFO - Attempting to download https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/submissions.zip
+2025-04-16 23:10:51,589 - INFO - Successfully downloaded submissions.zip
+2025-04-16 23:10:52,600 - INFO - Attempting to download https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/companyfacts.zip
+2025-04-16 23:11:16,598 - INFO - Successfully downloaded companyfacts.zip
+2025-04-16 23:11:17,609 - INFO - Attempting to download https://www.sec.gov/files/company_tickers.json to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/company_tickers.json
+2025-04-16 23:11:17,852 - INFO - Successfully downloaded company_tickers.json
+2025-04-16 23:11:18,855 - INFO - Downloaded files: [PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/submissions.zip'), PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/companyfacts.zip'), PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/company_tickers.json')]
+2025-04-16 23:11:18,855 - INFO - Connecting to DuckDB database: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb
+2025-04-16 23:11:18,898 - ERROR - An error occurred during database operations or extraction: IO Error: Could not set lock on file "/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb": Conflicting lock is held in /Users/dougstrouth/.duckdb/cli/1.2.2/duckdb (PID 10634) by user dougstrouth. See also https://duckdb.org/docs/connect/concurrency
+Traceback (most recent call last):
+  File "/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/APIs/edgar/main.py", line 208, in <module>
+    db_conn = duckdb.connect(database=str(DB_FILE), read_only=False)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+duckdb.duckdb.IOException: IO Error: Could not set lock on file "/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb": Conflicting lock is held in /Users/dougstrouth/.duckdb/cli/1.2.2/duckdb (PID 10634) by user dougstrouth. See also https://duckdb.org/docs/connect/concurrency
+2025-04-16 23:11:18,904 - INFO - --- Script Finished ---
+2025-04-16 23:12:05,938 - INFO - --- Starting EDGAR Bulk Data Download and Extraction ---
+2025-04-16 23:12:05,939 - INFO - Script execution started at: 2025-04-17T04:12:05.938556+00:00
+2025-04-16 23:12:05,939 - INFO - User context time (UTC): 2025-04-17T03:52:02+00:00
+2025-04-16 23:12:05,939 - WARNING - Please update the SEC_USER_AGENT variable in the script with your application name and contact email.
+2025-04-16 23:12:05,939 - INFO - Attempting to download https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/submissions.zip
+2025-04-16 23:12:31,495 - INFO - Successfully downloaded submissions.zip
+2025-04-16 23:12:32,506 - INFO - Attempting to download https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/companyfacts.zip
+2025-04-16 23:12:56,781 - INFO - Successfully downloaded companyfacts.zip
+2025-04-16 23:12:57,786 - INFO - Attempting to download https://www.sec.gov/files/company_tickers.json to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/company_tickers.json
+2025-04-16 23:12:58,247 - INFO - Successfully downloaded company_tickers.json
+2025-04-16 23:12:59,251 - INFO - Downloaded files: [PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/submissions.zip'), PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/companyfacts.zip'), PosixPath('/Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_bulk_downloads/company_tickers.json')]
+2025-04-16 23:12:59,252 - INFO - Connecting to DuckDB database: /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb
+2025-04-16 23:12:59,326 - INFO - Setting up database table 'extracted_files' in /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_file_index.duckdb
+2025-04-16 23:12:59,332 - INFO - Table 'extracted_files' created or already exists.
+2025-04-16 23:12:59,332 - INFO - Attempting to extract submissions.zip to /Users/dougstrouth/Library/Mobile Documents/com~apple~CloudDocs/Documents/Code/datasets/edgar/edgar_data_extracted
