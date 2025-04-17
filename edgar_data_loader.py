@@ -66,7 +66,7 @@ logging.basicConfig(
 )
 
 # --- Control Settings / Toggles ---
-PROCESS_LIMIT = 10
+PROCESS_LIMIT = None
 PROCESS_SPECIFIC_CIK = None
 SKIP_CIK_PREP = False
 SKIP_PARSING = False
@@ -74,7 +74,7 @@ SKIP_DB_LOAD = False
 SKIP_TABLE_CREATION = False
 SKIP_DATA_LOADING = False
 SKIP_INDEX_CREATION = False
-CIK_BATCH_SIZE = 1000 # Set to None to disable batching
+CIK_BATCH_SIZE = 100 # Set to None to disable batching
 
 # --- Log Initial Settings ---
 logging.info(f"--- Data Loader Script Start ---")

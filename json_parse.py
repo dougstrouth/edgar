@@ -215,17 +215,30 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
              })
         parsed_db_data["companies"] = company_record
 
-        # --- 2. Populate 'tickers' data ---
+       # --- 2. Populate 'tickers' data ---
         tickers = data.get('tickers', [])
         exchanges = data.get('exchanges', [])
         if isinstance(tickers, list) and isinstance(exchanges, list):
              num_tickers = min(len(tickers), len(exchanges))
              for i in range(num_tickers):
-                  if tickers[i]:
+                  ticker_symbol = tickers[i]
+                  exchange_name = exchanges[i] # Get exchange value
+
+                  # --- MODIFICATION START ---
+                  # Check if BOTH ticker symbol AND exchange name are present and are non-empty strings
+                  if ticker_symbol and isinstance(ticker_symbol, str) and \
+                     exchange_name and isinstance(exchange_name, str):
+                  # --- MODIFICATION END ---
+                       # Only append if both ticker and exchange are valid strings
                        parsed_db_data["tickers"].append({
-                           "cik": cik_padded, "ticker": tickers[i],
-                           "exchange": exchanges[i], "source": "submissions.json" # Track source
+                           "cik": cik_padded,
+                           "ticker": ticker_symbol, # Use variable
+                           "exchange": exchange_name, # Use variable
+                           "source": "submissions.json"
                        })
+                  else:
+                       # Optional: Log skipped entries for debugging potential data issues
+                       logging.debug(f"Skipping ticker entry for CIK {cik_padded} due to missing/empty ticker or exchange: Ticker='{ticker_symbol}', Exchange='{exchange_name}'")
 
         # --- 3. Populate 'former_names' data ---
         former_names_raw = data.get('formerNames', [])
