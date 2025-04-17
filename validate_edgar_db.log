@@ -1,0 +1,331 @@
+2025-04-17 18:41:05,257 - INFO - [<module>] --- Starting Database Validation for: /Users/dougstrouth/Documents/datasets/edgar/edgar_metadata.duckdb ---
+2025-04-17 18:41:05,353 - INFO - [<module>] Database connection successful.
+2025-04-17 18:41:05,354 - INFO - [run_validation_query] --- Running Check: Row count for companies ---
+2025-04-17 18:41:05,945 - INFO - [run_validation_query] Result:
+ count
+  7622
+2025-04-17 18:41:05,945 - INFO - [run_validation_query] --- Running Check: Row count for tickers ---
+2025-04-17 18:41:05,946 - INFO - [run_validation_query] Result:
+ count
+  9520
+2025-04-17 18:41:05,946 - INFO - [run_validation_query] --- Running Check: Row count for former_names ---
+2025-04-17 18:41:05,947 - INFO - [run_validation_query] Result:
+ count
+  6273
+2025-04-17 18:41:05,947 - INFO - [run_validation_query] --- Running Check: Row count for filings ---
+2025-04-17 18:41:05,948 - INFO - [run_validation_query] Result:
+  count
+4031978
+2025-04-17 18:41:05,948 - INFO - [run_validation_query] --- Running Check: Row count for xbrl_tags ---
+2025-04-17 18:41:05,949 - INFO - [run_validation_query] Result:
+ count
+ 13225
+2025-04-17 18:41:05,949 - INFO - [run_validation_query] --- Running Check: Row count for xbrl_facts ---
+2025-04-17 18:41:05,951 - INFO - [run_validation_query] Result:
+   count
+64060582
+2025-04-17 18:41:05,951 - INFO - [run_validation_query] --- Running Check: Row count for xbrl_facts_orphaned ---
+2025-04-17 18:41:05,951 - INFO - [run_validation_query] Result:
+  count
+8523571
+2025-04-17 18:41:05,952 - INFO - [run_validation_query] --- Running Check: Distinct values for companies.entity_type ---
+2025-04-17 18:41:05,961 - INFO - [run_validation_query] Result:
+entity_type
+  operating
+      other
+ investment
+2025-04-17 18:41:05,961 - INFO - [run_validation_query] --- Running Check: Distinct values for companies.state_of_incorporation ---
+2025-04-17 18:41:05,963 - INFO - [run_validation_query] Result:
+state_of_incorporation
+                    MD
+                    GA
+                    PA
+                    TX
+                    MI
+                    IA
+                    L2
+                    NM
+                    UT
+                    OR
+2025-04-17 18:41:05,963 - INFO - [run_validation_query] --- Running Check: Distinct values for companies.fiscal_year_end ---
+2025-04-17 18:41:05,964 - INFO - [run_validation_query] Result:
+fiscal_year_end
+           0531
+           1227
+           0930
+           1026
+           0426
+           0202
+           0126
+           0703
+           0102
+           0315
+2025-04-17 18:41:05,965 - INFO - [run_validation_query] --- Running Check: Distinct values for tickers.exchange ---
+2025-04-17 18:41:05,967 - INFO - [run_validation_query] Result:
+exchange
+    NYSE
+     OTC
+  Nasdaq
+    CBOE
+2025-04-17 18:41:05,967 - INFO - [run_validation_query] --- Running Check: Distinct values for tickers.source ---
+2025-04-17 18:41:05,969 - INFO - [run_validation_query] Result:
+          source
+submissions.json
+2025-04-17 18:41:05,969 - INFO - [run_validation_query] --- Running Check: Distinct values for filings.form ---
+2025-04-17 18:41:05,977 - INFO - [run_validation_query] Result:
+        form
+           4
+SCHEDULE 13G
+      SC 13G
+      25-NSE
+         S-4
+         FWP
+     NT 10-Q
+     DEFR14A
+      8-K12B
+       N-CEN
+2025-04-17 18:41:05,977 - INFO - [run_validation_query] --- Running Check: Distinct values for filings.act ---
+2025-04-17 18:41:05,997 - INFO - [run_validation_query] Result:
+  act
+   40
+   DF
+   39
+IC,IA
+   34
+   IC
+   33
+   35
+   NE
+40,33
+2025-04-17 18:41:05,997 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_tags.taxonomy ---
+2025-04-17 18:41:06,000 - INFO - [run_validation_query] Result:
+ taxonomy
+      srt
+      dei
+ifrs-full
+   invest
+  us-gaap
+2025-04-17 18:41:06,000 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts.unit ---
+2025-04-17 18:41:06,273 - INFO - [run_validation_query] Result:
+            unit
+            pure
+             CAD
+      CAD/shares
+        position
+    acquisitions
+      derivative
+            loan
+line_of_business
+             gal
+      Securities
+2025-04-17 18:41:06,273 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts.taxonomy ---
+2025-04-17 18:41:06,587 - INFO - [run_validation_query] Result:
+ taxonomy
+      srt
+      dei
+ifrs-full
+  us-gaap
+   invest
+2025-04-17 18:41:06,587 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts.form ---
+2025-04-17 18:41:06,676 - INFO - [run_validation_query] Result:
+   form
+   10-K
+   40-F
+  10-KT
+  8-K/A
+ 40-F/A
+ 10-K/A
+   20-F
+ 20-F/A
+    8-K
+10-KT/A
+2025-04-17 18:41:06,676 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts.fp ---
+2025-04-17 18:41:06,702 - INFO - [run_validation_query] Result:
+  fp
+  M9
+  FY
+  Q1
+  Q3
+  T3
+  T1
+  H1
+None
+  CY
+    
+2025-04-17 18:41:06,702 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts_orphaned.unit ---
+2025-04-17 18:41:06,740 - INFO - [run_validation_query] Result:
+             unit
+           shares
+             Year
+          country
+Operating_Segment
+        hTMNumber
+            Banks
+         Defaults
+            MMBTU
+           Number
+              CNY
+2025-04-17 18:41:06,740 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts_orphaned.taxonomy ---
+2025-04-17 18:41:06,784 - INFO - [run_validation_query] Result:
+ taxonomy
+      srt
+   invest
+  us-gaap
+      dei
+ifrs-full
+2025-04-17 18:41:06,784 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts_orphaned.form ---
+2025-04-17 18:41:06,800 - INFO - [run_validation_query] Result:
+  form
+   8-K
+10-K/A
+  20-F
+20-F/A
+40-F/A
+ 6-K/A
+ 10-QT
+  10-K
+  40-F
+ 8-K/A
+2025-04-17 18:41:06,801 - INFO - [run_validation_query] --- Running Check: Distinct values for xbrl_facts_orphaned.fp ---
+2025-04-17 18:41:06,807 - INFO - [run_validation_query] Result:
+  fp
+None
+  H1
+  Q4
+  Q3
+  FY
+  Q1
+  Q2
+    
+  CY
+2025-04-17 18:41:06,807 - INFO - [run_validation_query] --- Running Check: Date range for former_names.date_from ---
+2025-04-17 18:41:06,854 - INFO - [run_validation_query] Result:
+                 min_date                  max_date
+1993-08-12 23:00:00-05:00 2025-02-09 23:00:00-06:00
+2025-04-17 18:41:06,854 - INFO - [run_validation_query] --- Running Check: Date range for former_names.date_to ---
+2025-04-17 18:41:06,856 - INFO - [run_validation_query] Result:
+                 min_date                  max_date
+1994-01-06 23:00:00-06:00 2025-04-15 23:00:00-05:00
+2025-04-17 18:41:06,857 - INFO - [run_validation_query] --- Running Check: Date range for filings.filing_date ---
+2025-04-17 18:41:06,862 - INFO - [run_validation_query] Result:
+  min_date   max_date
+1994-01-04 2025-04-16
+2025-04-17 18:41:06,862 - INFO - [run_validation_query] --- Running Check: Date range for filings.report_date ---
+2025-04-17 18:41:06,869 - INFO - [run_validation_query] Result:
+  min_date   max_date
+1935-03-02 2039-09-18
+2025-04-17 18:41:06,870 - INFO - [run_validation_query] --- Running Check: Date range for filings.acceptance_datetime ---
+2025-04-17 18:41:06,891 - INFO - [run_validation_query] Result:
+                 min_date                  max_date
+1994-01-03 18:00:00-06:00 2025-04-16 20:50:42-05:00
+2025-04-17 18:41:06,891 - INFO - [run_validation_query] --- Running Check: Date range for xbrl_facts.period_start_date ---
+2025-04-17 18:41:06,980 - INFO - [run_validation_query] Result:
+  min_date   max_date
+1944-06-01 2102-01-01
+2025-04-17 18:41:06,980 - INFO - [run_validation_query] --- Running Check: Date range for xbrl_facts.period_end_date ---
+2025-04-17 18:41:07,055 - INFO - [run_validation_query] Result:
+  min_date   max_date
+1967-05-25 2207-03-31
+2025-04-17 18:41:07,055 - INFO - [run_validation_query] --- Running Check: Date range for xbrl_facts.filed_date ---
+2025-04-17 18:41:07,129 - INFO - [run_validation_query] Result:
+  min_date   max_date
+2009-05-07 2025-04-16
+2025-04-17 18:41:07,129 - INFO - [run_validation_query] --- Running Check: Date range for xbrl_facts_orphaned.period_start_date ---
+2025-04-17 18:41:07,145 - INFO - [run_validation_query] Result:
+  min_date   max_date
+1900-01-01 2027-01-01
+2025-04-17 18:41:07,145 - INFO - [run_validation_query] --- Running Check: Date range for xbrl_facts_orphaned.period_end_date ---
+2025-04-17 18:41:07,159 - INFO - [run_validation_query] Result:
+  min_date   max_date
+1984-12-04 2199-12-31
+2025-04-17 18:41:07,159 - INFO - [run_validation_query] --- Running Check: Date range for xbrl_facts_orphaned.filed_date ---
+2025-04-17 18:41:07,172 - INFO - [run_validation_query] Result:
+  min_date   max_date
+2009-04-15 2024-03-28
+2025-04-17 18:41:07,172 - INFO - [<module>] 
+--- Checking Foreign Key Integrity (Expecting 0 violations for non-orphan tables) ---
+2025-04-17 18:41:07,172 - INFO - [run_validation_query] --- Running Check: FK Violation Check: tickers -> companies ---
+2025-04-17 18:41:07,176 - INFO - [run_validation_query] Result:
+ count
+     0
+2025-04-17 18:41:07,177 - INFO - [run_validation_query] --- Running Check: FK Violation Check: former_names -> companies ---
+2025-04-17 18:41:07,179 - INFO - [run_validation_query] Result:
+ count
+     0
+2025-04-17 18:41:07,179 - INFO - [run_validation_query] --- Running Check: FK Violation Check: filings -> companies ---
+2025-04-17 18:41:07,195 - INFO - [run_validation_query] Result:
+ count
+     0
+2025-04-17 18:41:07,196 - INFO - [run_validation_query] --- Running Check: FK Violation Check: xbrl_facts -> companies ---
+2025-04-17 18:41:07,392 - INFO - [run_validation_query] Result:
+ count
+     0
+2025-04-17 18:41:07,392 - INFO - [run_validation_query] --- Running Check: FK Violation Check: xbrl_facts -> filings ---
+2025-04-17 18:41:07,751 - INFO - [run_validation_query] Result:
+ count
+     0
+2025-04-17 18:41:07,753 - INFO - [run_validation_query] --- Running Check: FK Violation Check: xbrl_facts -> xbrl_tags ---
+2025-04-17 18:41:08,275 - INFO - [run_validation_query] Result:
+ count
+     0
+2025-04-17 18:41:08,275 - INFO - [run_validation_query] --- Running Check: Orphan Check: Total orphaned facts ---
+2025-04-17 18:41:08,276 - INFO - [run_validation_query] Result:
+  count
+8523571
+2025-04-17 18:41:08,276 - INFO - [run_validation_query] --- Running Check: Orphan Check: Sample orphaned CIKs/Accession Nums ---
+2025-04-17 18:41:08,315 - INFO - [run_validation_query] Result:
+       cik     accession_number
+0000079879 0001193125-11-204498
+0000079879 0000079879-13-000016
+0000079879 0000079879-13-000047
+0000079879 0000079879-15-000009
+0000079879 0000079879-14-000064
+0000079879 0000079879-15-000026
+0000079879 0000079879-15-000043
+0000079879 0001193125-10-033939
+0000080424 0001193125-10-238937
+0000080424 0000080424-15-000014
+2025-04-17 18:41:08,315 - INFO - [run_validation_query] --- Running Check: Data Type Check: xbrl_facts.unit ---
+2025-04-17 18:41:08,542 - INFO - [run_validation_query] Result:
+        unit
+  USD/shares
+        item
+        sqft
+        Rate
+         EUR
+    Employee
+Subsidiaries
+       years
+    hospital
+         PHP
+2025-04-17 18:41:08,542 - INFO - [run_validation_query] --- Running Check: Data Type Check: xbrl_facts.taxonomy ---
+2025-04-17 18:41:08,825 - INFO - [run_validation_query] Result:
+ taxonomy
+      dei
+ifrs-full
+  us-gaap
+   invest
+      srt
+2025-04-17 18:41:08,825 - INFO - [run_validation_query] --- Running Check: Data Type Check: xbrl_facts_orphaned.unit ---
+2025-04-17 18:41:08,859 - INFO - [run_validation_query] Result:
+                unit
+              shares
+                Year
+   operating_segment
+              number
+InterestRateSwapAgre
+     branch_building
+Derivative_Instrumen
+                Well
+     USD/CommonStock
+             country
+2025-04-17 18:41:08,859 - INFO - [run_validation_query] --- Running Check: Data Type Check: xbrl_facts_orphaned.taxonomy ---
+2025-04-17 18:41:08,901 - INFO - [run_validation_query] Result:
+ taxonomy
+      dei
+ifrs-full
+      srt
+   invest
+  us-gaap
+2025-04-17 18:41:08,901 - INFO - [<module>] 
+--- Validation Checks Complete ---
