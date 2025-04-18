@@ -139,6 +139,7 @@ dependencies = [
     { name = "logging" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "python-dotenv" },
     { name = "requests" },
     { name = "tqdm" },
 ]
@@ -151,6 +152,7 @@ requires-dist = [
     { name = "logging", specifier = ">=0.4.9.6" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "pyarrow", specifier = ">=19.0.1" },
+    { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
