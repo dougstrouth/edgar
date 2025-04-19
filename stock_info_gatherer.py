@@ -1,542 +1,751 @@
 # -*- coding: utf-8 -*-
 """
-Stock Info Gatherer Script (v4.0 - Clean Implementation)
+Stock Info Gatherer Script (v3 - Iterative Skeleton)
 
-Fetches supplementary company info (profile, ISIN, metrics), calendar events,
-analyst recommendations, holder data (major, institutional, mutual fund),
-stock actions (dividends/splits), and financial statement data (long format)
-using yfinance. Stores data in respective DuckDB tables.
-Prioritizes correct syntax and implementation of agreed-upon logic.
+Fetches supplementary company info using yfinance for a sample of tickers,
+focusing on one data domain at a time for verification. This version fetches
+Profile/Metrics, Actions, Financial Statements, Holders, Recommendations, AND Calendar Events.
+
+Uses:
+- config_utils.AppConfig for potential future config needs.
+- logging_utils.setup_logging for standardized logging.
+- yfinance for data fetching.
 """
 
-from database_conn import ManagedDatabaseConnection, get_db_connection # Import both
-import duckdb # Keep original duckdb import if needed for types etc.import pandas as pd
-import yfinance as yf
-from pathlib import Path
 import logging
-import os
-from dotenv import load_dotenv
 import sys
 import time
+from pathlib import Path
+from typing import Optional, List, Dict, Any
 from datetime import datetime, date, timezone, timedelta
-from tqdm import tqdm
-from typing import Optional, Dict, List, Tuple, Any
-import numpy as np
-import io
-import re
 
-# --- Configuration and Logging Setup ---
-script_dir = Path(__file__).resolve().parent
-dotenv_path = script_dir / '.env'
-if not dotenv_path.is_file(): dotenv_path = script_dir.parent / '.env'
-if dotenv_path.is_file(): load_dotenv(dotenv_path=dotenv_path)
-else: print(f"Warning: .env file not found.", file=sys.stderr)
+import pandas as pd
+import yfinance as yf
 
-try: DEFAULT_DB_FILE = Path(os.environ['DB_FILE']).resolve()
-except KeyError: DEFAULT_DB_FILE = script_dir.parent / "edgar_metadata.duckdb"; print(f"Warning: DB_FILE defaulting to {DEFAULT_DB_FILE}", file=sys.stderr)
+# --- Import Utilities ---
+try:
+    from config_utils import AppConfig
+    from logging_utils import setup_logging
+except ImportError as e:
+    print(f"FATAL: Could not import utility modules (config_utils, logging_utils): {e}", file=sys.stderr)
+    print("Ensure these files exist and are in the correct location.", file=sys.stderr)
+    sys.exit(1)
 
-log_file_path = script_dir / "stock_info_gatherer.log"
-log_file_path.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(funcName)s] %(message)s',
-    handlers=[ logging.FileHandler(log_file_path), logging.StreamHandler()]
-)
+
+# --- Setup Logging ---
+SCRIPT_NAME = Path(__file__).stem
+LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
+logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # --- Constants ---
-PROFILE_TABLE_NAME = "company_profile"
-METRICS_TABLE_NAME = "company_key_metrics"
-ACTIONS_TABLE_NAME = "stock_actions"
-FIN_FACTS_TABLE_NAME = "yfinance_financial_facts"
-RECS_TABLE_NAME = "analyst_recommendations"
-HOLDERS_MAJOR_TABLE_NAME = "major_holders"
-HOLDERS_INST_TABLE_NAME = "institutional_holders"
-HOLDERS_MF_TABLE_NAME = "mutual_fund_holders"
-CALENDAR_TABLE_NAME = "calendar_events"
-ERROR_TABLE_NAME = "stock_fetch_errors"
-YFINANCE_DELAY = 0.6 # Be polite to Yahoo Finance
+YFINANCE_DELAY = 0.7 # Seconds delay between ticker requests or major data type fetches
 
-# --- Database Functions ---
-def connect_db(db_path_str: str, read_only: bool = True) -> Optional[duckdb.DuckDBPyConnection]:
-    is_memory = (db_path_str == ':memory:')
-    db_path = None
-    if not is_memory:
-        db_path = Path(db_path_str)
-        if not db_path.exists():
-             logging.warning(f"DB path not found: {db_path_str}. Attempting creation.")
-             try: db_path.parent.mkdir(parents=True, exist_ok=True)
-             except Exception as dir_e: logging.error(f"Cannot create dir {db_path.parent}: {dir_e}"); return None
-    try: conn = duckdb.connect(database=db_path_str, read_only=read_only); logging.info(f"Connected: {db_path_str} (RO: {read_only})"); return conn
-    except Exception as e: logging.error(f"Failed connect {db_path_str}: {e}", exc_info=True); return None
+# --- Fetcher Functions (Candidates for yfinance_fetchers.py) ---
 
-def setup_info_tables(con: duckdb.DuckDBPyConnection):
-    """Creates/Alters tables for supplementary stock info."""
-    logging.info("Setting up supplementary tables...")
-    # Define tables, including ISIN directly in profile
-    profile_sql = f"""CREATE TABLE IF NOT EXISTS {PROFILE_TABLE_NAME} (ticker VARCHAR PRIMARY KEY COLLATE NOCASE, cik VARCHAR, fetch_timestamp TIMESTAMPTZ NOT NULL, quoteType VARCHAR, exchange VARCHAR, longName VARCHAR, sector VARCHAR, industry VARCHAR, longBusinessSummary TEXT, fullTimeEmployees INTEGER, website VARCHAR, beta DOUBLE, exchangeTimezoneName VARCHAR, exchangeTimezoneShortName VARCHAR, auditRisk INTEGER, boardRisk INTEGER, compensationRisk INTEGER, shareHolderRightsRisk INTEGER, overallRisk INTEGER, governanceEpochDate BIGINT, compensationAsOfEpochDate BIGINT, isin VARCHAR);"""
-    metrics_sql = f"""CREATE TABLE IF NOT EXISTS {METRICS_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, fetch_date DATE NOT NULL, marketCap BIGINT, enterpriseValue BIGINT, trailingPE DOUBLE, forwardPE DOUBLE, priceToBook DOUBLE, priceToSalesTrailing12Months DOUBLE, enterpriseToRevenue DOUBLE, enterpriseToEbitda DOUBLE, dividendRate DOUBLE, dividendYield DOUBLE, beta DOUBLE, fiftyTwoWeekHigh DOUBLE, fiftyTwoWeekLow DOUBLE, sharesOutstanding BIGINT, floatShares BIGINT, bookValue DOUBLE, regularMarketPrice DOUBLE, previousClose DOUBLE, volume BIGINT, averageVolume BIGINT, averageVolume10days BIGINT, exDividendDate DATE, PRIMARY KEY (ticker, fetch_date));"""
-    fin_facts_sql = f"""CREATE TABLE IF NOT EXISTS {FIN_FACTS_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, report_date DATE NOT NULL, frequency VARCHAR NOT NULL, statement_type VARCHAR NOT NULL, item_label VARCHAR NOT NULL, value DOUBLE PRECISION, fetch_timestamp TIMESTAMPTZ NOT NULL, PRIMARY KEY (ticker, report_date, frequency, item_label));"""
-    actions_sql = f"""CREATE TABLE IF NOT EXISTS {ACTIONS_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, action_date DATE NOT NULL, action_type VARCHAR NOT NULL, value DOUBLE NOT NULL, PRIMARY KEY (ticker, action_date, action_type));"""
-    error_sql = f"""CREATE TABLE IF NOT EXISTS {ERROR_TABLE_NAME} (cik VARCHAR, ticker VARCHAR COLLATE NOCASE, error_timestamp TIMESTAMPTZ NOT NULL, error_type VARCHAR NOT NULL, error_message VARCHAR, start_date_req DATE, end_date_req DATE);"""
-    calendar_sql = f"""CREATE TABLE IF NOT EXISTS {CALENDAR_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, event_type VARCHAR NOT NULL, event_start_date DATE, event_end_date DATE, fetch_timestamp TIMESTAMPTZ NOT NULL, PRIMARY KEY (ticker, event_type));"""
-    recs_sql = f"""CREATE TABLE IF NOT EXISTS {RECS_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, recommendation_timestamp TIMESTAMPTZ NOT NULL, firm VARCHAR NOT NULL, to_grade VARCHAR, from_grade VARCHAR, action VARCHAR, fetch_timestamp TIMESTAMPTZ NOT NULL, PRIMARY KEY (ticker, recommendation_timestamp, firm));"""
-    holders_major_sql = f"""CREATE TABLE IF NOT EXISTS {HOLDERS_MAJOR_TABLE_NAME} (ticker VARCHAR PRIMARY KEY COLLATE NOCASE, pct_insiders DOUBLE PRECISION, pct_institutions DOUBLE PRECISION, fetch_timestamp TIMESTAMPTZ NOT NULL);"""
-    holders_inst_sql = f"""CREATE TABLE IF NOT EXISTS {HOLDERS_INST_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, report_date DATE NOT NULL, holder VARCHAR NOT NULL, shares BIGINT, pct_out DOUBLE PRECISION, value BIGINT, fetch_timestamp TIMESTAMPTZ NOT NULL, PRIMARY KEY (ticker, report_date, holder));"""
-    holders_mf_sql = f"""CREATE TABLE IF NOT EXISTS {HOLDERS_MF_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, report_date DATE NOT NULL, holder VARCHAR NOT NULL, shares BIGINT, pct_out DOUBLE PRECISION, value BIGINT, fetch_timestamp TIMESTAMPTZ NOT NULL, PRIMARY KEY (ticker, report_date, holder));"""
-    all_sql = [(PROFILE_TABLE_NAME, profile_sql), (METRICS_TABLE_NAME, metrics_sql), (FIN_FACTS_TABLE_NAME, fin_facts_sql), (ACTIONS_TABLE_NAME, actions_sql), (ERROR_TABLE_NAME, error_sql), (CALENDAR_TABLE_NAME, calendar_sql), (RECS_TABLE_NAME, recs_sql), (HOLDERS_MAJOR_TABLE_NAME, holders_major_sql), (HOLDERS_INST_TABLE_NAME, holders_inst_sql), (HOLDERS_MF_TABLE_NAME, holders_mf_sql)]
+def fetch_profile_metrics(ticker_obj: yf.Ticker, logger: logging.Logger) -> Optional[Dict[str, Any]]:
+    """Fetches the .info dictionary containing profile and key metrics."""
+    ticker_symbol = ticker_obj.ticker
+    logger.debug(f"Attempting to fetch .info for {ticker_symbol}")
     try:
-        for name, sql in all_sql: con.execute(sql); logging.debug(f"Table '{name}' setup ok.")
-    except Exception as e: logging.error(f"Failed setup_info_tables: {e}", exc_info=True); raise
-
-def drop_info_tables(con: duckdb.DuckDBPyConnection):
-    tables = [PROFILE_TABLE_NAME, METRICS_TABLE_NAME, ACTIONS_TABLE_NAME, FIN_FACTS_TABLE_NAME, RECS_TABLE_NAME, HOLDERS_MAJOR_TABLE_NAME, HOLDERS_INST_TABLE_NAME, HOLDERS_MF_TABLE_NAME, CALENDAR_TABLE_NAME, ERROR_TABLE_NAME] # Include error table if managed here
-    logging.warning(f"Dropping tables: {', '.join(tables)}")
-    try: [con.execute(f"DROP TABLE IF EXISTS {t};") for t in tables]
-    except Exception as e: logging.error(f"Failed drop: {e}", exc_info=True); raise
-
-def clear_info_tables(con: duckdb.DuckDBPyConnection):
-    tables = [PROFILE_TABLE_NAME, METRICS_TABLE_NAME, ACTIONS_TABLE_NAME, FIN_FACTS_TABLE_NAME, RECS_TABLE_NAME, HOLDERS_MAJOR_TABLE_NAME, HOLDERS_INST_TABLE_NAME, HOLDERS_MF_TABLE_NAME, CALENDAR_TABLE_NAME]
-    logging.warning(f"Clearing data: {', '.join(tables)}")
-    try:
-        db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
-        for t in tables:
-            if t.lower() in db_tables: con.execute(f"DELETE FROM {t};"); logging.info(f"Cleared {t}.")
-            else: logging.warning(f"Table {t} not found.")
-        # Optionally clear errors related ONLY to this script
-        if ERROR_TABLE_NAME.lower() in db_tables:
-             con.execute(f"DELETE FROM {ERROR_TABLE_NAME} WHERE error_type LIKE '%Info%' OR error_type LIKE '%Financials%' OR error_type LIKE '%Actions%' OR error_type LIKE '%Calendar%' OR error_type LIKE '%Recs%' OR error_type LIKE '%Holders%'")
-             logging.info(f"Cleared relevant errors from {ERROR_TABLE_NAME}")
-    except Exception as e: logging.error(f"Failed clear: {e}", exc_info=True); raise
-
-def log_info_fetch_error(con: duckdb.DuckDBPyConnection, cik: Optional[str], ticker: str, error_type: str, message: str):
-    timestamp = datetime.now(timezone.utc)
-    logging.warning(f"Log err: CIK={cik}, Ticker={ticker}, Type={error_type}, Msg={message}")
-    try: con.execute(f"INSERT INTO {ERROR_TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?)", [cik, ticker, timestamp, error_type, message, None, None])
+        info_data = ticker_obj.info
+        if not info_data:
+            logger.warning(f"No .info dictionary returned for {ticker_symbol}.")
+            return None
+        if isinstance(info_data, dict) and ('symbol' in info_data or 'longName' in info_data or len(info_data)>1):
+             logger.info(f"Successfully fetched .info for {ticker_symbol} (Keys: {len(info_data)})")
+             return info_data
+        else:
+             logger.warning(f"Empty or unexpected format for .info for {ticker_symbol}: {info_data}")
+             return None
     except Exception as e:
-        if "TransactionContext Error" in str(e): logging.error(f"Err log fail (TX Abort) Ticker {ticker}: {e}")
-        else: logging.error(f"CRITICAL insert err log CIK {cik}/Ticker {ticker}: {e}", exc_info=True)
+        logger.error(f"Failed fetching .info for {ticker_symbol}: {type(e).__name__} - {e}", exc_info=False)
+        return None
 
-def get_db_columns(con: duckdb.DuckDBPyConnection, table_name: str) -> List[str]:
-    try: cols = con.execute(f"PRAGMA table_info('{table_name}');").fetchall(); return [col[1] for col in cols]
-    except duckdb.duckdb.TransactionException as te: raise
-    except Exception as e: logging.error(f"Failed get cols {table_name}: {e}", exc_info=True); return []
-
-def load_data(con: duckdb.DuckDBPyConnection, data_df: pd.DataFrame, table_name: str, mode: str) -> bool:
-    """Loads a prepared DataFrame into the specified table using INSERT OR REPLACE or INSERT."""
-    if data_df is None or data_df.empty: logging.debug(f"DF {table_name} empty."); return True
-    ticker = data_df['ticker'].iloc[0] if 'ticker' in data_df.columns else 'N/A'
-    logging.info(f"Loading {len(data_df)} rows into {table_name} for {ticker} (Mode: {mode})")
-
-    # Ensure DF columns match DB (caller should prepare DF with correct names/order)
-    # Convert Pandas NA/NaT to None just before loading
-    load_df_final = data_df.astype(object).where(pd.notnull(data_df), None)
-
-    reg_name = f'{table_name}_reg_{int(time.time()*1000)}'
-    try:
-        # Use SQL to directly select columns from registered DF matching table columns
-        db_cols = get_db_columns(con, table_name)
-        if not db_cols: logging.error(f"Cannot load {table_name}, get cols failed."); return False
-        db_cols_str = ", ".join([f'"{c}"' for c in db_cols])
-        select_cols_str = ", ".join([f'"{c}"' for c in db_cols if c in load_df_final.columns]) # Select only cols existing in DF
-
-        con.register(reg_name, load_df_final)
-        # Use INSERT OR REPLACE based on primary key defined in the table schema
-        sql = f"INSERT OR REPLACE INTO {table_name} ({db_cols_str}) SELECT {db_cols_str} FROM {reg_name}" if mode != 'full_refresh' else f"INSERT INTO {table_name} ({db_cols_str}) SELECT {db_cols_str} FROM {reg_name}"
-
-        con.execute(sql)
-        con.unregister(reg_name)
-        logging.debug(f"Loaded {table_name} for {ticker}.")
-        return True
-    except Exception as e:
-        logging.error(f"DB error loading {table_name} for {ticker}: {e}", exc_info=False)
-        try: con.unregister(reg_name)
-        except: pass
-        return False
-
-# --- Data Fetching Functions ---
-# (fetch_company_info, fetch_financial_statement, fetch_stock_actions are unchanged from v3.8)
-def fetch_company_info(ticker_obj: yf.Ticker) -> Optional[Dict[str, Any]]:
-    try: info = ticker_obj.info; return info if info and isinstance(info, dict) else None
-    except Exception as e: logging.error(f"Failed fetch .info {ticker_obj.ticker}: {type(e).__name__}-{e}", exc_info=False); return None
-
-def fetch_financial_statement(ticker_obj: yf.Ticker, statement_type: str, frequency: str) -> Optional[pd.DataFrame]:
-    logging.debug(f"Fetching raw {frequency} {statement_type} for {ticker_obj.ticker}")
-    try:
-        method_map = { ('financials', 'quarterly'): ticker_obj.quarterly_financials, ('financials', 'annual'): ticker_obj.financials, ('balance_sheet', 'quarterly'): ticker_obj.quarterly_balance_sheet, ('balance_sheet', 'annual'): ticker_obj.balance_sheet, ('cashflow', 'quarterly'): ticker_obj.quarterly_cashflow, ('cashflow', 'annual'): ticker_obj.cashflow, }
-        data = method_map.get((statement_type, frequency))
-        if data is None or data.empty: logging.info(f"No raw {frequency} {statement_type} data found {ticker_obj.ticker}."); return None
-        return data
-    except Exception as e: logging.error(f"Failed fetch raw {frequency} {statement_type} {ticker_obj.ticker}: {type(e).__name__}-{e}", exc_info=False); return None
-
-def fetch_stock_actions(ticker_obj: yf.Ticker) -> Optional[pd.DataFrame]:
-    logging.debug(f"Fetching actions for {ticker_obj.ticker}")
+def fetch_actions(ticker_obj: yf.Ticker, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Fetches stock actions (dividends, splits)."""
+    ticker_symbol = ticker_obj.ticker
+    logger.debug(f"Attempting to fetch actions for {ticker_symbol}")
     try:
         actions = ticker_obj.actions
-        if actions is None or actions.empty: logging.info(f"No actions {ticker_obj.ticker}."); return None
-        actions.index.name = 'action_date'; actions.reset_index(inplace=True)
-        actions['ticker'] = ticker_obj.ticker; actions['action_date'] = pd.to_datetime(actions['action_date']).dt.date
-        actions_melted = actions.melt(id_vars=['ticker', 'action_date'], value_vars=['Dividends', 'Stock Splits'], var_name='action_type', value_name='value')
-        actions_melted = actions_melted[actions_melted['value'] != 0.0]; actions_melted.dropna(subset=['value'], inplace=True)
-        actions_melted['action_type'] = actions_melted['action_type'].replace({'Stock Splits': 'Split'})
-        return actions_melted[['ticker', 'action_date', 'action_type', 'value']]
-    except Exception as e: logging.error(f"Failed actions {ticker_obj.ticker}: {type(e).__name__} - {e}", exc_info=False); return None
+        if actions is None or actions.empty:
+            logger.info(f"No actions data found for {ticker_symbol}.")
+            return None
+        logger.info(f"Successfully fetched actions data for {ticker_symbol} (Entries: {len(actions)})")
+        return actions
+    except Exception as e:
+        logger.error(f"Failed fetch actions for {ticker_symbol}: {type(e).__name__} - {e}", exc_info=False)
+        return None
 
-# --- Fetch Functions for ISIN, Calendar, Recs, Holders ---
-def fetch_isin(ticker_obj: yf.Ticker) -> Optional[str]:
-    logging.debug(f"Fetching ISIN for {ticker_obj.ticker}")
-    try: isin = ticker_obj.isin; return isin if isinstance(isin, str) and isin != '-' else None
-    except Exception as e: logging.error(f"Failed ISIN {ticker_obj.ticker}: {e}", exc_info=False); return None
+def fetch_financials(ticker_obj: yf.Ticker, logger: logging.Logger) -> Dict[str, Optional[pd.DataFrame]]:
+    """
+    Fetches financials, balance sheet, cash flow (annual & quarterly).
+    Returns a dictionary where keys are statement names (e.g., 'financials_annual')
+    and values are the fetched DataFrames (or None if fetch failed/empty).
+    """
+    ticker_symbol = ticker_obj.ticker
+    logger.debug(f"Attempting to fetch financial statements for {ticker_symbol}")
+    fetched_data = {}
+    statement_map = {
+        'financials_annual': (ticker_obj.financials, 'annual'),
+        'financials_quarterly': (ticker_obj.quarterly_financials, 'quarterly'),
+        'balance_sheet_annual': (ticker_obj.balance_sheet, 'annual'),
+        'balance_sheet_quarterly': (ticker_obj.quarterly_balance_sheet, 'quarterly'),
+        'cashflow_annual': (ticker_obj.cashflow, 'annual'),
+        'cashflow_quarterly': (ticker_obj.quarterly_cashflow, 'quarterly'),
+    }
+    for name, (method, freq) in statement_map.items():
+        data = None
+        try:
+            data = method
+            if data is not None and not data.empty:
+                logger.info(f"Successfully fetched {name} for {ticker_symbol} (Shape: {data.shape})")
+                fetched_data[name] = data
+            else:
+                logger.info(f"No data found for {name} for {ticker_symbol}.")
+                fetched_data[name] = None
+        except Exception as e:
+             logger.error(f"Failed fetch {name} for {ticker_symbol}: {type(e).__name__} - {e}", exc_info=False)
+             fetched_data[name] = None
+        time.sleep(0.1)
+    return fetched_data
 
-def fetch_calendar(ticker_obj: yf.Ticker) -> Optional[pd.DataFrame]:
-    # *** FIX: Correct dict handling ***
-    logging.debug(f"Fetching calendar for {ticker_obj.ticker}")
-    try:
-        cal_data = ticker_obj.calendar
-        if not cal_data or not isinstance(cal_data, dict): logging.info(f"No calendar data/wrong format {ticker_obj.ticker}."); return None
-        cal_processed = []
-        # Earnings Date processing
-        earnings_info = cal_data.get('Earnings')
-        if earnings_info and isinstance(earnings_info.get('Earnings Date'), (list, tuple)) and len(earnings_info['Earnings Date']) > 0:
-             start_ts = earnings_info['Earnings Date'][0]; end_ts = earnings_info['Earnings Date'][1] if len(earnings_info['Earnings Date']) > 1 else start_ts
-             start_date = pd.to_datetime(start_ts, errors='coerce', unit='s').date() if pd.notna(start_ts) else None
-             end_date = pd.to_datetime(end_ts, errors='coerce', unit='s').date() if pd.notna(end_ts) else start_date
-             if start_date: cal_processed.append({'event_type': 'Earnings', 'event_start_date': start_date, 'event_end_date': end_date})
-        # Dividend Date processing
-        div_ts = cal_data.get('Dividend Date')
-        if pd.notna(div_ts):
-             div_date = pd.to_datetime(div_ts, errors='coerce', unit='s').date()
-             if div_date: cal_processed.append({'event_type': 'Dividend', 'event_start_date': div_date, 'event_end_date': div_date})
-        # Ex-Dividend Date processing
-        ex_div_ts = cal_data.get('Ex-Dividend Date')
-        if pd.notna(ex_div_ts):
-             ex_div_date = pd.to_datetime(ex_div_ts, errors='coerce', unit='s').date()
-             if ex_div_date: cal_processed.append({'event_type': 'Ex-Dividend', 'event_start_date': ex_div_date, 'event_end_date': ex_div_date})
-        if not cal_processed: logging.info(f"No processable events found in calendar for {ticker_obj.ticker}."); return None
-        df = pd.DataFrame(cal_processed); df['ticker'] = ticker_obj.ticker; df['fetch_timestamp'] = datetime.now(timezone.utc)
-        cal_db_cols = ['ticker', 'event_type', 'event_start_date', 'event_end_date', 'fetch_timestamp']
-        return df[[c for c in cal_db_cols if c in df.columns]]
-    except Exception as e: logging.error(f"Failed calendar {ticker_obj.ticker}: {e}", exc_info=True); return None
+def fetch_holders(ticker_obj: yf.Ticker, logger: logging.Logger) -> Dict[str, Optional[Any]]:
+    """
+    Fetches major, institutional, and mutual fund holders.
+    Returns a dictionary with keys 'major', 'institutional', 'mutualfund'
+    and values being the raw fetched data (DataFrame or None).
+    """
+    ticker_symbol = ticker_obj.ticker
+    logger.debug(f"Attempting to fetch holders for {ticker_symbol}")
+    fetched_data = {'major': None, 'institutional': None, 'mutualfund': None}
+    holder_map = {
+        'major': ticker_obj.major_holders,
+        'institutional': ticker_obj.institutional_holders,
+        'mutualfund': ticker_obj.mutualfund_holders,
+    }
+    for name, data_property in holder_map.items():
+         data = None
+         try:
+            data = data_property
+            if data is not None and not data.empty:
+                logger.info(f"Successfully fetched {name}_holders for {ticker_symbol} (Shape/Len: {getattr(data,'shape',len(data) if data is not None else 'N/A')})")
+                fetched_data[name] = data
+            else:
+                 logger.info(f"No data found for {name}_holders for {ticker_symbol}.")
+                 fetched_data[name] = None
+         except Exception as e:
+             logger.error(f"Failed fetch {name}_holders for {ticker_symbol}: {type(e).__name__} - {e}", exc_info=False)
+             fetched_data[name] = None
+         time.sleep(0.1)
+    return fetched_data
 
-def fetch_recommendations(ticker_obj: yf.Ticker) -> Optional[pd.DataFrame]:
-    # *** FIX: Robust column handling ***
-    logging.debug(f"Fetching recommendations for {ticker_obj.ticker}")
+def fetch_recommendations(ticker_obj: yf.Ticker, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Fetches analyst recommendations."""
+    ticker_symbol = ticker_obj.ticker
+    logger.debug(f"Attempting to fetch recommendations for {ticker_symbol}")
     try:
         recs = ticker_obj.recommendations
-        if recs is None or recs.empty: logging.info(f"No recs {ticker_obj.ticker}."); return None
-        logging.debug(f"Raw recommendations columns: {recs.columns}")
-        recs.index.name = 'recommendation_timestamp_idx'
-        recs.reset_index(inplace=True)
-        recs['ticker'] = ticker_obj.ticker
-        recs['fetch_timestamp'] = datetime.now(timezone.utc)
-        # Define mapping from common yfinance names to DB names
-        # Use lower case for matching resilience
-        col_map = { 'recommendation_timestamp_idx': 'recommendation_timestamp', 'firm': 'firm', 'to grade': 'to_grade', 'from grade': 'from_grade', 'action': 'action'}
-        final_df = pd.DataFrame({'ticker': recs['ticker'], 'fetch_timestamp': recs['fetch_timestamp']}) # Start with base cols
+        if recs is None or recs.empty:
+            logger.info(f"No recommendations data found for {ticker_symbol}.")
+            return None
+        logger.info(f"Successfully fetched recommendations for {ticker_symbol} (Entries: {len(recs)})")
+        return recs
+    except Exception as e:
+        logger.error(f"Failed fetch recommendations for {ticker_symbol}: {type(e).__name__} - {e}", exc_info=False)
+        return None
 
-        for yf_col_pattern, db_col in col_map.items():
-            matched_col = next((c for c in recs.columns if str(c).lower() == yf_col_pattern.lower()), None)
-            if matched_col:
-                 final_df[db_col] = recs[matched_col]
-            else:
-                 logging.warning(f"Expected rec column like '{yf_col_pattern}' not found for {ticker_obj.ticker}")
-                 final_df[db_col] = None # Add column as None if missing
+def fetch_calendar(ticker_obj: yf.Ticker, logger: logging.Logger) -> Optional[Any]:
+    """
+    Fetches calendar events (earnings, dividends).
+    Handles return types being DataFrame or dict.
+    """
+    ticker_symbol = ticker_obj.ticker
+    logger.debug(f"Attempting to fetch calendar for {ticker_symbol}")
+    try:
+        cal_data = ticker_obj.calendar
 
-        # Convert timestamp
-        ts_col = 'recommendation_timestamp'
-        if ts_col in final_df.columns:
-            final_df[ts_col] = pd.to_datetime(final_df[ts_col], errors='coerce', utc=True)
-            if final_df[ts_col].dt.tz is None: final_df[ts_col] = final_df[ts_col].dt.tz_localize(timezone.utc)
-            else: final_df[ts_col] = final_df[ts_col].dt.tz_convert(timezone.utc)
-        else: logging.warning(f"'{ts_col}' missing for {ticker_obj.ticker}."); return None # Need for PK
+        # --- CORRECTED CHECK for None, Empty DataFrame, or Empty Dict ---
+        is_empty = False
+        if cal_data is None:
+            is_empty = True
+        elif isinstance(cal_data, pd.DataFrame):
+            is_empty = cal_data.empty
+        elif isinstance(cal_data, dict):
+            is_empty = not cal_data # An empty dict evaluates to False
+        else:
+            logger.warning(f"Unexpected data type for calendar {ticker_symbol}: {type(cal_data)}")
+            is_empty = True # Treat unexpected types as empty/invalid
 
-        # Check PKs
-        pk_cols = ['ticker', 'recommendation_timestamp', 'firm']
-        if not all(pk in final_df.columns for pk in pk_cols): logging.warning(f"PK cols missing recs {ticker_obj.ticker}"); return None
-        final_df.dropna(subset=pk_cols, inplace=True)
-        if final_df.empty: return None
+        if is_empty:
+            logger.info(f"No calendar data found for {ticker_symbol}.")
+            return None
+        # --- End CORRECTION ---
 
-        db_cols_order = ['ticker', 'recommendation_timestamp', 'firm', 'to_grade', 'from_grade', 'action', 'fetch_timestamp']
-        return final_df[[c for c in db_cols_order if c in final_df.columns]]
-    except Exception as e: logging.error(f"Failed recs {ticker_obj.ticker}: {e}", exc_info=True); return None
+        logger.info(f"Successfully fetched calendar data for {ticker_symbol}")
+        # Return raw data structure (dict or DataFrame) for now
+        return cal_data
+    except Exception as e:
+        logger.error(f"Failed fetch calendar for {ticker_symbol}: {type(e).__name__} - {e}", exc_info=False)
+        return None
+# --- Parsing Functions (Convert Raw Fetched Data to Structured DataFrames) ---
 
-def fetch_major_holders(ticker_obj: yf.Ticker) -> Optional[pd.DataFrame]:
-     # *** FIX: More robust parsing using labels ***
-     logging.debug(f"Fetching major holders for {ticker_obj.ticker}")
-     try:
-         holders_data = ticker_obj.major_holders
-         if holders_data is None or holders_data.empty: logging.info(f"No major holders {ticker_obj.ticker}."); return None
-         logging.debug(f"Raw major_holders data type: {type(holders_data)}\n{holders_data}")
-         pct_insiders = None; pct_institutions = None
-         # yfinance often returns a 2-column DataFrame [Value, Label]
-         if isinstance(holders_data, pd.DataFrame) and holders_data.shape[1] >= 2:
-             # Standardize column access attempt
-             holders_data.columns = ['Value', 'Label']
-             for _, row in holders_data.iterrows():
-                 label = str(row.get('Label', '')).lower() # Safe access with .get()
-                 value_str = str(row.get('Value', '')).replace('%','')
-                 try:
-                     value_float = float(value_str) / 100.0
-                     if 'insider' in label: pct_insiders = value_float
-                     elif 'institutions' in label: pct_institutions = value_float
-                 except (ValueError, TypeError): continue
-         else: logging.warning(f"Unexpected format {type(holders_data)} for major holders {ticker_obj.ticker}")
-         if pct_insiders is None and pct_institutions is None: return None
-         data = {'ticker': ticker_obj.ticker, 'pct_insiders': pct_insiders, 'pct_institutions': pct_institutions, 'fetch_timestamp': datetime.now(timezone.utc)}
-         return pd.DataFrame([data])
-     except Exception as e: logging.error(f"Failed major holders {ticker_obj.ticker}: {e}", exc_info=True); return None
+def parse_profile_metrics(info_dict: Optional[Dict], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses the .info dictionary into a DataFrame for the yf_profile_metrics table."""
+    if not info_dict:
+        return None
+    logger.debug(f"Parsing .info data for {ticker}")
 
-def _process_holders_df(df: pd.DataFrame, ticker: str) -> Optional[pd.DataFrame]:
-    # *** FIX: Correct rename map key 'pctHeld' ***
-    if df is None or df.empty: return None
-    expected_cols_map = { 'Date Reported': 'report_date', 'Holder': 'holder', 'Shares': 'shares', 'pctHeld': 'pct_out', 'Value': 'value'}
-    logging.debug(f"Processing holders {ticker}. In cols: {list(df.columns)}")
-    cols_to_keep = [yf_col for yf_col in expected_cols_map if yf_col in df.columns]
-    if not all(ec in cols_to_keep for ec in ['Date Reported', 'Holder', 'Shares']): # Check required minimums *before* processing
-         logging.warning(f"Holder DF {ticker} missing core cols. Has: {list(df.columns)}")
+    # Define columns based on the CREATE TABLE statement (subset of info_dict keys)
+    profile_cols = [
+        'cik', 'isin', 'quoteType', 'exchange', 'longName', 'sector', 'industry',
+        'longBusinessSummary', 'fullTimeEmployees', 'website', 'exchangeTimezoneName',
+        'exchangeTimezoneShortName', 'auditRisk', 'boardRisk', 'compensationRisk',
+        'shareHolderRightsRisk', 'overallRisk', 'governanceEpochDate', 'compensationAsOfEpochDate',
+        'marketCap', 'enterpriseValue', 'beta', 'trailingPE', 'forwardPE', 'priceToBook',
+        'priceToSalesTrailing12Months', 'enterpriseToRevenue', 'enterpriseToEbitda',
+        'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'sharesOutstanding', 'floatShares', 'bookValue',
+        'dividendRate', 'dividendYield', 'exDividendDate', 'lastFiscalYearEnd',
+        'nextFiscalYearEnd', 'mostRecentQuarter', 'earningsTimestamp', 'earningsTimestampStart',
+        'earningsTimestampEnd', 'lastDividendValue', 'lastDividendDate'
+    ]
+    parsed_data = {'ticker': ticker, 'fetch_timestamp': fetch_ts}
+
+    for col in profile_cols:
+        parsed_data[col] = info_dict.get(col) # get() returns None if key is missing
+
+    # --- Date Conversions (before DataFrame creation is fine) ---
+    for date_key in ['exDividendDate', 'lastFiscalYearEnd', 'nextFiscalYearEnd', 'mostRecentQuarter']:
+         if date_key in parsed_data and parsed_data[date_key] is not None:
+             try:
+                 if isinstance(parsed_data[date_key], (int, float)):
+                     parsed_data[date_key] = datetime.fromtimestamp(parsed_data[date_key], timezone.utc).date()
+                 else:
+                      parsed_data[date_key] = pd.to_datetime(parsed_data[date_key], errors='coerce').date()
+             except (TypeError, ValueError, OSError) as e:
+                 logger.warning(f"Could not parse date '{parsed_data[date_key]}' for {date_key} in {ticker}: {e}")
+                 parsed_data[date_key] = None
+
+    # --- Create DataFrame FIRST ---
+    try:
+        df = pd.DataFrame([parsed_data])
+    except Exception as df_e:
+         logger.error(f"Failed to create DataFrame from parsed_data for {ticker}: {df_e}", exc_info=True)
          return None
-    df_processed = df[cols_to_keep].copy(); df_processed.rename(columns=expected_cols_map, inplace=True)
-    df_processed['ticker'] = ticker; df_processed['fetch_timestamp'] = datetime.now(timezone.utc)
-    if 'report_date' in df_processed.columns: df_processed['report_date'] = pd.to_datetime(df_processed['report_date'], errors='coerce').dt.date
-    if 'pct_out' in df_processed.columns: df_processed['pct_out'] = pd.to_numeric(df_processed['pct_out'], errors='coerce')
-    if 'shares' in df_processed.columns: df_processed['shares'] = pd.to_numeric(df_processed['shares'], errors='coerce').astype('Int64')
-    if 'value' in df_processed.columns: df_processed['value'] = pd.to_numeric(df_processed['value'], errors='coerce').astype('Int64')
-    pk_cols = ['ticker', 'report_date', 'holder']; df_processed.dropna(subset=[pk for pk in pk_cols if pk in df_processed.columns], inplace=True)
-    if df_processed.empty: return None
-    db_cols = ['ticker', 'report_date', 'holder', 'shares', 'pct_out', 'value', 'fetch_timestamp']
-    return df_processed[[c for c in db_cols if c in df_processed.columns]]
 
-def fetch_institutional_holders(ticker_obj: yf.Ticker) -> Optional[pd.DataFrame]:
-    logging.debug(f"Fetching inst holders {ticker_obj.ticker}")
-    try: holders = ticker_obj.institutional_holders; return _process_holders_df(holders, ticker_obj.ticker)
-    except Exception as e: logging.error(f"Failed inst holders {ticker_obj.ticker}: {e}", exc_info=False); return None
+    # --- CORRECTED: Convert integer types *on the DataFrame* ---
+    int_keys = ['fullTimeEmployees', 'auditRisk', 'boardRisk', 'compensationRisk',
+                'shareHolderRightsRisk', 'overallRisk', 'marketCap', 'enterpriseValue',
+                'sharesOutstanding', 'floatShares', # Keep epoch dates as potentially large numbers if needed
+                'governanceEpochDate', 'compensationAsOfEpochDate', 'earningsTimestamp',
+                'earningsTimestampStart', 'earningsTimestampEnd', 'lastDividendDate']
 
-def fetch_mutualfund_holders(ticker_obj: yf.Ticker) -> Optional[pd.DataFrame]:
-    logging.debug(f"Fetching MF holders {ticker_obj.ticker}")
-    try: holders = ticker_obj.mutualfund_holders; return _process_holders_df(holders, ticker_obj.ticker)
-    except Exception as e: logging.error(f"Failed MF holders {ticker_obj.ticker}: {e}", exc_info=False); return None
+    for int_key in int_keys:
+         if int_key in df.columns: # Check if the column exists in the DataFrame
+             try:
+                  # Apply astype to the DataFrame column, using pd.NA for unparseable
+                  df[int_key] = pd.to_numeric(df[int_key], errors='coerce').astype('Int64')
+             except (ValueError, TypeError) as e: # Removed AttributeError catch as it shouldn't happen on Series
+                  logger.warning(f"Could not convert column {int_key} to Int64 for {ticker}: {e}. Values may be pd.NA.")
+                  # pd.to_numeric with errors='coerce' already turns failures into NaN/NA
+                  # so the .astype('Int64') should handle those correctly.
+                  # We log the warning but don't need to manually set NA here.
+                  pass # Continue attempt with other columns
 
-# --- Financial Fact Processing ---
-def process_and_load_financial_facts( con: duckdb.DuckDBPyConnection, raw_df: pd.DataFrame, ticker: str, statement_type: str, frequency: str, mode: str ) -> bool:
-    # *** FIX: Correct KeyError ['item_label'] ***
-    if raw_df is None or raw_df.empty: logging.debug(f"Raw DF empty {ticker} {frequency} {statement_type}."); return True
-    logging.info(f"Processing {frequency} {statement_type} for {ticker} ({len(raw_df)} items)")
-    table_name = FIN_FACTS_TABLE_NAME; pk_cols = ['ticker', 'report_date', 'frequency', 'item_label']
+    # Ensure columns match the table definition order if necessary later
+    # For now, just return the processed DataFrame
+    return df
+def parse_actions(actions_df: Optional[pd.DataFrame], ticker: str, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses the raw actions DataFrame into the structure for the yf_stock_actions table."""
+    if actions_df is None or actions_df.empty:
+        return None
+    logger.debug(f"Parsing actions data for {ticker}")
     try:
-        # Assign index name FIRST
-        raw_df.index.name = 'item_label'
-        # Minimal cleaning of index values
-        raw_df.index = raw_df.index.map(lambda x: str(x).strip() if pd.notna(x) else None)
-        # Drop rows where the label is None or empty (violates PK) - uses index name assigned above
-        raw_df.dropna(axis=0, subset=['item_label'], inplace=True)
-        raw_df = raw_df[raw_df.index != ''] # Check for empty string after strip
-        if raw_df.empty: logging.warning(f"Index clean removed rows {ticker} {frequency} {statement_type}."); return True
-        # Melt DataFrame
-        long_df = raw_df.reset_index().melt(id_vars=['item_label'], var_name='report_date', value_name='value')
-        # Clean and Convert Data Types
-        long_df['report_date'] = pd.to_datetime(long_df['report_date'], errors='coerce').dt.date
-        long_df['value'] = pd.to_numeric(long_df['value'], errors='coerce')
-        # Add Metadata Columns BEFORE dropping NAs based on PK
-        long_df['ticker'] = ticker; long_df['frequency'] = frequency; long_df['statement_type'] = statement_type; long_df['fetch_timestamp'] = datetime.now(timezone.utc)
-        # Drop only if essential PK components are missing (value can be NaN)
-        long_df.dropna(subset=['ticker', 'report_date', 'frequency', 'item_label'], inplace=True)
-        if long_df.empty: logging.warning(f"Melt/PK clean removed rows {ticker} {frequency} {statement_type}."); return True
-        # Prepare for Loading
-        db_cols = get_db_columns(con, table_name)
-        if not db_cols: logging.error(f"Cannot load {table_name}, get cols failed."); return False
-        final_df = long_df[[col for col in db_cols if col in long_df.columns]].copy()
-        for col in db_cols: # Add any missing DB cols as None
-            if col not in final_df.columns: final_df[col] = None
-        final_df = final_df[db_cols]; final_df = final_df.astype(object).where(pd.notnull(final_df), None)
-        if final_df[pk_cols].isnull().values.any(): logging.error(f"Load fail {ticker} {table_name}: PK NULL."); logging.debug(f"Problem PKs:\n {final_df[final_df[pk_cols].isnull().any(axis=1)][pk_cols]}"); return False
-        # Load using INSERT OR REPLACE
-        reg_name = f'{table_name}_reg_{int(time.time()*1000)}'; con.register(reg_name, final_df)
-        cols_str = ", ".join([f'"{c}"' for c in db_cols])
-        sql = f"INSERT OR REPLACE INTO {table_name} ({cols_str}) SELECT {cols_str} FROM {reg_name}" if mode != 'full_refresh' else f"INSERT INTO {table_name} ({cols_str}) SELECT {cols_str} FROM {reg_name}"
-        con.execute(sql); con.unregister(reg_name); logging.debug(f"Loaded {len(final_df)} facts {table_name} {ticker} {frequency} {statement_type}."); return True
-    except Exception as e: logging.error(f"Failed process/load {frequency} {statement_type} {ticker}: {e}", exc_info=True); return False
+        actions = actions_df.copy()
+        actions.index.name = 'action_date'
+        actions.reset_index(inplace=True)
+        actions['ticker'] = ticker
+        # Convert timezone-aware to naive UTC date
+        actions['action_date'] = pd.to_datetime(actions['action_date'], errors='coerce', utc=True).dt.date
+        actions_melted = actions.melt(
+            id_vars=['ticker', 'action_date'],
+            value_vars=['Dividends', 'Stock Splits'],
+            var_name='action_type',
+            value_name='value'
+        )
+        # Filter out rows where the action value is 0 or NaN (meaning no action of that type occurred on that date)
+        actions_melted = actions_melted[actions_melted['value'] != 0.0]
+        actions_melted.dropna(subset=['value', 'action_date', 'action_type'], inplace=True) # Drop if key info missing
 
+        if actions_melted.empty:
+            logger.info(f"No non-zero actions found after parsing for {ticker}")
+            return None
 
-# --- Main Pipeline Function ---
-def run_stock_info_pipeline(
-    mode: str = 'initial_load',
-    target_tickers: Optional[List[str]] = None,
-    db_file_path_str: str = str(DEFAULT_DB_FILE),
-    update_profile_if_older_than_days: int = 30
-):
-    """Main function including ISIN, Calendar, Recs, Holders."""
-    start_run_time = time.time()
-    logging.info(f"--- Starting Stock Info Pipeline (v3.9 - Focused Fixes) ---") # Version bump
-    logging.info(f"Database: {db_file_path_str}")
-    logging.info(f"Run Mode: {mode}")
-    if target_tickers: logging.info(f"Target Tickers: {target_tickers}")
-    logging.info(f"Update Profile Threshold (Days): {update_profile_if_older_than_days}")
+        # Rename 'Dividends' -> 'Dividend', 'Stock Splits' -> 'Split'
+        actions_melted['action_type'] = actions_melted['action_type'].replace({'Dividends': 'Dividend', 'Stock Splits': 'Split'})
 
-    valid_modes=['initial_load','append','full_refresh','drop_tables']
-    if mode not in valid_modes: logging.error(f"Invalid mode '{mode}'."); return
-    is_memory_db = (db_file_path_str == ':memory:')
-    if is_memory_db and not target_tickers: logging.error("Must provide target_tickers when using ':memory:'."); return
+        # Ensure correct types
+        actions_melted['value'] = pd.to_numeric(actions_melted['value'], errors='coerce')
+        actions_melted.dropna(subset=['value'], inplace=True) # Ensure value is numeric
 
-    write_conn = connect_db(db_file_path_str, read_only=False)
-    if not write_conn: logging.error(f"Failed connect DB."); return
+        # Keep only necessary columns
+        final_cols = ['ticker', 'action_date', 'action_type', 'value']
+        return actions_melted[final_cols]
+    except Exception as e:
+        logger.error(f"Failed to parse actions for {ticker}: {e}", exc_info=True)
+        return None
+# --- CORRECTED parse_major_holders (using index as label) ---
+def parse_major_holders(major_holders_data: Optional[Any], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses the raw major holders data into a DataFrame, assuming index is the label."""
+    if major_holders_data is None: return None
+    logger.debug(f"Parsing major holders data for {ticker} (type: {type(major_holders_data)})")
 
-    # Mode Handling & Setup
-    try:
-        if mode == 'drop_tables': write_conn.begin(); drop_info_tables(write_conn); write_conn.commit(); logging.info("Drop finished."); write_conn.close(); return
-        write_conn.begin(); setup_info_tables(write_conn); write_conn.commit()
-        if mode == 'full_refresh': write_conn.begin(); clear_info_tables(write_conn); write_conn.commit(); logging.info("Full refresh clear done.")
-    except Exception as setup_e:
-         logging.error(f"Failed setup/clear: {setup_e}. Exiting.", exc_info=True)
-         try:
-             if write_conn and not write_conn.closed: write_conn.rollback(); logging.warning("Rolled back setup tx.")
-         except Exception as rb_e: logging.error(f"Rollback attempt failed: {rb_e}")
-         finally:
-             if write_conn and not write_conn.closed: write_conn.close()
-         return
+    # --- Add DEBUG PRINT again to be sure ---
+    print(f"\nDEBUG PRINT for {ticker} - Major Holders Data:")
+    print(f"Type: {type(major_holders_data)}")
+    print(f"Index: {getattr(major_holders_data, 'index', 'N/A')}")
+    print(f"Columns: {getattr(major_holders_data, 'columns', 'N/A')}")
+    print(f"Data:\n{major_holders_data}\n")
+    # --- END DEBUG PRINT ---
 
-    # Identify Tickers
-    tickers_to_process = []
-    if target_tickers: tickers_to_process = [t.upper() for t in target_tickers]; logging.info(f"Processing {len(tickers_to_process)} target tickers.")
+    pct_insiders = None
+    pct_institutions = None
+
+    # Expecting a DataFrame where the *index* contains the labels (Breakdown)
+    # and the *first column* contains the values
+    if isinstance(major_holders_data, pd.DataFrame) and not major_holders_data.empty:
+        # Check if it has at least ONE column for values
+        if major_holders_data.shape[1] >= 1:
+            val_col_idx = 0 # Assume value is the first column
+            val_col_name = major_holders_data.columns[val_col_idx]
+            logger.debug(f"Using index for labels and column '{val_col_name}' (idx {val_col_idx}) for values.")
+
+            # Iterate through the index (labels) and corresponding values
+            for label_str_raw, value_data in zip(major_holders_data.index, major_holders_data.iloc[:, val_col_idx]):
+                label_str = str(label_str_raw).lower()
+                # Value seems to be already a float/number based on previous debug output
+                try:
+                    value_float = float(value_data)
+                    if not pd.isna(value_float): # Check for NaN explicitly
+                        # Check label for keywords
+                        if 'insider' in label_str:
+                            pct_insiders = value_float
+                            logger.debug(f"Parsed pct_insiders: {pct_insiders} from label '{label_str}'")
+                        # Use specific label check now that we see the index name
+                        elif 'institutionspercentheld' == label_str.replace(' ',''):
+                            pct_institutions = value_float
+                            logger.debug(f"Parsed pct_institutions: {pct_institutions} from label '{label_str}'")
+                    # Ignore other index rows like institutionsFloatPercentHeld, institutionsCount
+                except (ValueError, TypeError) as e:
+                     logger.warning(f"Could not parse value '{value_data}' for label '{label_str}' in {ticker}: {e}")
+                     continue # Skip this row if parsing fails
+        else:
+            logger.warning(f"Major holders DataFrame for {ticker} has zero columns. Cannot parse.")
+
+    elif isinstance(major_holders_data, list):
+         logger.warning(f"Major holders for {ticker} was a list, parsing not fully implemented yet.")
+         pass
     else:
-        source_table = "stock_history"; count = 0
-        try: count = write_conn.execute(f"SELECT COUNT(*) FROM {source_table}").fetchone()[0]
-        except: logging.warning(f"{source_table} not found/err, trying 'tickers'.")
-        if count == 0: source_table = "tickers"
-        try: ticker_rows = write_conn.execute(f"SELECT DISTINCT ticker FROM {source_table} WHERE ticker IS NOT NULL ORDER BY ticker").fetchall(); tickers_to_process = [row[0] for row in ticker_rows]; logging.info(f"Found {len(tickers_to_process)} unique tickers in '{source_table}'.")
-        except Exception as e: logging.error(f"Failed query tickers: {e}. Need target_tickers.", exc_info=True); write_conn.close(); return
-    if not tickers_to_process: logging.warning("No tickers identified."); write_conn.close(); return
+          logger.warning(f"Unexpected data type for major holders {ticker}: {type(major_holders_data)}")
 
-    # Get profile timestamps
-    profile_timestamps = {};
-    try: results = write_conn.execute(f"SELECT ticker, fetch_timestamp FROM {PROFILE_TABLE_NAME}").fetchall(); profile_timestamps = {t: ts for t, ts in results}; logging.info(f"Found {len(profile_timestamps)} profile timestamps.")
-    except Exception as e: logging.warning(f"Could not query profile timestamps: {e}")
+    # Create DataFrame only if some data was found
+    if pct_insiders is not None or pct_institutions is not None:
+        data = { 'ticker': ticker, 'fetch_timestamp': fetch_ts, 'pct_insiders': pct_insiders, 'pct_institutions': pct_institutions }
+        df = pd.DataFrame([data]); df['pct_insiders'] = df['pct_insiders'].astype('float64'); df['pct_institutions'] = df['pct_institutions'].astype('float64'); return df
+    else:
+        if isinstance(major_holders_data, pd.DataFrame) and not major_holders_data.empty:
+             logger.warning(f"Parsing major_holders for {ticker} yielded no insider or institution percentages.")
+        return None
+# --- End CORRECTED parse_major_holders ---
 
-    # Iterate, Fetch, Load
-    total_tickers_to_process = len(tickers_to_process)
-    processed_tickers_count = 0; skipped_tickers_count = 0
-    fetch_errors_count = 0; load_errors_count = 0
 
-    logging.info(f"Starting fetch/load loop for {total_tickers_to_process} tickers...")
-    for i, ticker in enumerate(tqdm(tickers_to_process, desc="Gathering Stock Info", unit="ticker")):
-        logging.debug(f"Processing {i + 1}/{total_tickers_to_process}: Ticker {ticker}")
-        load_failed_flag = False # Reset flags per ticker
-        profile_df, metrics_df, actions_df = None, None, None
-        cal_df, recs_df, major_df, inst_df, mf_df = None, None, None, None, None
-        raw_fin_dfs = {}
-        fetch_results = {} # Track success of individual fetches
+def _parse_detailed_holders(holders_df: Optional[pd.DataFrame], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Helper function to parse Institutional or Mutual Fund holders DataFrame."""
+    if holders_df is None or holders_df.empty:
+        return None
+    logger.debug(f"Parsing detailed holders data for {ticker}")
+    try:
+        holders = holders_df.copy()
+        # Expected columns from yfinance and target DB names
+        # Use lowercase for matching resilience
+        col_map = {
+            'holder': 'holder',
+            'shares': 'shares',
+            '% out': 'pct_out', # Note the space in yfinance sometimes
+            'date reported': 'report_date',
+            'value': 'value'
+        }
+        rename_dict = {}
+        found_cols = []
+        for yf_col_name in holders.columns:
+            yf_col_lower = str(yf_col_name).lower()
+            for map_key, db_col in col_map.items():
+                 # Check for variations like '% Out' vs 'pctheld'
+                 if yf_col_lower == map_key or (map_key == '% out' and yf_col_lower == 'pctheld'):
+                      rename_dict[yf_col_name] = db_col
+                      found_cols.append(db_col)
+                      break
+
+        if not all(c in found_cols for c in ['holder', 'report_date', 'shares']):
+             logger.warning(f"Missing essential columns ('holder', 'report_date', 'shares') in detailed holders for {ticker}. Found: {list(holders.columns)}")
+             return None
+
+        holders.rename(columns=rename_dict, inplace=True)
+
+        holders['ticker'] = ticker
+        holders['fetch_timestamp'] = fetch_ts
+
+        # Clean data types, preserving NaNs
+        holders['report_date'] = pd.to_datetime(holders['report_date'], errors='coerce').dt.date
+        holders['shares'] = pd.to_numeric(holders['shares'], errors='coerce').astype('Int64')
+        if 'pct_out' in holders.columns:
+             holders['pct_out'] = pd.to_numeric(holders['pct_out'], errors='coerce')
+        if 'value' in holders.columns:
+             holders['value'] = pd.to_numeric(holders['value'], errors='coerce').astype('Int64')
+
+        # Ensure required PK columns are present
+        required_cols = ['ticker', 'holder', 'report_date']
+        holders.dropna(subset=[col for col in required_cols if col in holders.columns], inplace=True)
+
+        # Select and order columns for the database
+        db_cols = ['ticker', 'holder', 'report_date', 'fetch_timestamp', 'shares', 'pct_out', 'value']
+        final_df = holders[[col for col in db_cols if col in holders.columns]].copy()
+
+        return final_df if not final_df.empty else None
+
+    except Exception as e:
+        logger.error(f"Failed to parse detailed holders for {ticker}: {e}", exc_info=True)
+        return None
+
+def parse_institutional_holders(holders_df: Optional[pd.DataFrame], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses Institutional Holders."""
+    return _parse_detailed_holders(holders_df, ticker, fetch_ts, logger)
+
+def parse_mutual_fund_holders(holders_df: Optional[pd.DataFrame], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses Mutual Fund Holders."""
+    return _parse_detailed_holders(holders_df, ticker, fetch_ts, logger)
+
+def parse_recommendations(recs_df: Optional[pd.DataFrame], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses the raw recommendations DataFrame."""
+    if recs_df is None or recs_df.empty:
+        return None
+    logger.debug(f"Parsing recommendations data for {ticker}")
+    try:
+        recs = recs_df.copy()
+        recs.index.name = 'recommendation_timestamp' # Use the index directly
+        recs.reset_index(inplace=True)
+        recs['ticker'] = ticker
+        recs['fetch_timestamp'] = fetch_ts
+
+        # Rename columns robustly (handle case variations)
+        col_map = {
+            'firm': 'firm',
+            'to grade': 'to_grade',
+            'from grade': 'from_grade',
+            'action': 'action'
+        }
+        rename_dict = {}
+        current_cols_lower = {str(c).lower(): c for c in recs.columns}
+
+        for map_key_lower, db_col in col_map.items():
+             if map_key_lower in current_cols_lower:
+                 rename_dict[current_cols_lower[map_key_lower]] = db_col
+
+        recs.rename(columns=rename_dict, inplace=True)
+
+        # Convert timestamp to timezone-aware UTC
+        if 'recommendation_timestamp' in recs.columns:
+             recs['recommendation_timestamp'] = pd.to_datetime(recs['recommendation_timestamp'], errors='coerce', utc=True)
+             # Ensure it has timezone info
+             if recs['recommendation_timestamp'].dt.tz is None:
+                  logger.warning(f"Recommendation timestamp for {ticker} was timezone naive, assuming UTC.")
+                  recs['recommendation_timestamp'] = recs['recommendation_timestamp'].dt.tz_localize('UTC')
+             else:
+                  recs['recommendation_timestamp'] = recs['recommendation_timestamp'].dt.tz_convert('UTC')
+
+        # Ensure required PK columns are not null
+        pk_cols = ['ticker', 'recommendation_timestamp', 'firm']
+        recs.dropna(subset=[col for col in pk_cols if col in recs.columns], inplace=True)
+
+        if recs.empty: return None
+
+        # Select and order columns
+        db_cols = ['ticker', 'recommendation_timestamp', 'firm', 'fetch_timestamp', 'to_grade', 'from_grade', 'action']
+        final_df = recs[[col for col in db_cols if col in recs.columns]].copy()
+
+        return final_df
+    except Exception as e:
+        logger.error(f"Failed to parse recommendations for {ticker}: {e}", exc_info=True)
+        return None
+
+def parse_calendar(cal_data: Optional[Any], ticker: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses calendar data (dict or DataFrame) into a structured DataFrame."""
+    if cal_data is None or (isinstance(cal_data, dict) and not cal_data) or (isinstance(cal_data, pd.DataFrame) and cal_data.empty):
+        return None
+    logger.debug(f"Parsing calendar data for {ticker} (type: {type(cal_data)})")
+    parsed_events = []
+
+    try:
+        # Handle if yfinance returns a DataFrame directly (newer versions might)
+        if isinstance(cal_data, pd.DataFrame):
+            # Assuming columns might be 'Earnings Date', 'Earnings High', 'Earnings Low', 'Earnings Average',
+            # 'Revenue High', 'Revenue Low', 'Revenue Average', 'Dividend Date', 'Ex-Dividend Date'
+            cal_data.columns = [str(c).replace(' ','') for c in cal_data.columns] # Normalize column names
+
+            # Process Earnings
+            if 'EarningsDate' in cal_data.columns:
+                # Might be a list/tuple of timestamps in the first row
+                if isinstance(cal_data['EarningsDate'].iloc[0], (list, tuple)) and len(cal_data['EarningsDate'].iloc[0]) > 0:
+                     start_ts = cal_data['EarningsDate'].iloc[0][0]
+                     end_ts = cal_data['EarningsDate'].iloc[0][1] if len(cal_data['EarningsDate'].iloc[0]) > 1 else start_ts
+                     start_date = pd.to_datetime(start_ts, errors='coerce', unit='s').date() if pd.notna(start_ts) else None
+                     end_date = pd.to_datetime(end_ts, errors='coerce', unit='s').date() if pd.notna(end_ts) else start_date
+                     if start_date:
+                          parsed_events.append({
+                              'event_type': 'Earnings', 'event_start_date': start_date, 'event_end_date': end_date,
+                              'earnings_avg': cal_data['EarningsAverage'].iloc[0] if 'EarningsAverage' in cal_data.columns else None,
+                              'earnings_low': cal_data['EarningsLow'].iloc[0] if 'EarningsLow' in cal_data.columns else None,
+                              'earnings_high': cal_data['EarningsHigh'].iloc[0] if 'EarningsHigh' in cal_data.columns else None,
+                              'revenue_avg': cal_data['RevenueAverage'].iloc[0] if 'RevenueAverage' in cal_data.columns else None,
+                              'revenue_low': cal_data['RevenueLow'].iloc[0] if 'RevenueLow' in cal_data.columns else None,
+                              'revenue_high': cal_data['RevenueHigh'].iloc[0] if 'RevenueHigh' in cal_data.columns else None,
+                          })
+
+            # Process Ex-Dividend Date
+            if 'ExDividendDate' in cal_data.columns and pd.notna(cal_data['ExDividendDate'].iloc[0]):
+                ex_div_date = pd.to_datetime(cal_data['ExDividendDate'].iloc[0], errors='coerce', unit='s').date()
+                if ex_div_date:
+                    parsed_events.append({'event_type': 'ExDividendDate', 'event_start_date': ex_div_date, 'event_end_date': ex_div_date})
+
+        # Handle if yfinance returns a dictionary (older versions or different structure)
+        elif isinstance(cal_data, dict):
+            # Process Earnings dictionary
+            earnings_info = cal_data.get('Earnings')
+            if isinstance(earnings_info, dict) and 'Earnings Date' in earnings_info:
+                earnings_dates = earnings_info['Earnings Date']
+                if isinstance(earnings_dates, (list, tuple)) and len(earnings_dates) > 0:
+                    start_ts = earnings_dates[0]; end_ts = earnings_dates[1] if len(earnings_dates) > 1 else start_ts
+                    start_date = pd.to_datetime(start_ts, errors='coerce', unit='s').date() if pd.notna(start_ts) else None
+                    end_date = pd.to_datetime(end_ts, errors='coerce', unit='s').date() if pd.notna(end_ts) else start_date
+                    if start_date:
+                         parsed_events.append({
+                             'event_type': 'Earnings', 'event_start_date': start_date, 'event_end_date': end_date,
+                             'earnings_avg': earnings_info.get('Earnings Average'),
+                             'earnings_low': earnings_info.get('Earnings Low'),
+                             'earnings_high': earnings_info.get('Earnings High'),
+                             'revenue_avg': earnings_info.get('Revenue Average'),
+                             'revenue_low': earnings_info.get('Revenue Low'),
+                             'revenue_high': earnings_info.get('Revenue High'),
+                         })
+
+            # Process Ex-Dividend Date from dict
+            ex_div_ts = cal_data.get('Ex-Dividend Date')
+            if pd.notna(ex_div_ts):
+                ex_div_date = pd.to_datetime(ex_div_ts, errors='coerce', unit='s').date()
+                if ex_div_date:
+                    parsed_events.append({'event_type': 'ExDividendDate', 'event_start_date': ex_div_date, 'event_end_date': ex_div_date})
+
+        if not parsed_events:
+             logger.info(f"No parsable calendar events found for {ticker}")
+             return None
+
+        df = pd.DataFrame(parsed_events)
+        df['ticker'] = ticker
+        df['fetch_timestamp'] = fetch_ts
+
+        # Convert numeric types, preserving NaN
+        num_cols = ['earnings_avg', 'earnings_low', 'earnings_high', 'revenue_avg', 'revenue_low', 'revenue_high']
+        for col in num_cols:
+             if col in df.columns:
+                  df[col] = pd.to_numeric(df[col], errors='coerce')
+                  # Check if column needs to be BIGINT
+                  if 'revenue' in col: df[col] = df[col].astype('Int64')
+
+        # Select and order columns
+        db_cols = ['ticker', 'event_type', 'fetch_timestamp', 'event_start_date', 'event_end_date',
+                   'earnings_avg', 'earnings_low', 'earnings_high', 'revenue_avg', 'revenue_low', 'revenue_high']
+        final_df = df[[col for col in db_cols if col in df.columns]].copy()
+
+        return final_df if not final_df.empty else None
+
+    except Exception as e:
+        logger.error(f"Failed to parse calendar data for {ticker}: {e}", exc_info=True)
+        return None
+
+def parse_financial_statement(stmt_df: Optional[pd.DataFrame], ticker: str, stmt_type: str, freq: str, fetch_ts: datetime, logger: logging.Logger) -> Optional[pd.DataFrame]:
+    """Parses a raw financial statement DataFrame into a long-format DataFrame."""
+    if stmt_df is None or stmt_df.empty:
+        return None
+    logger.debug(f"Parsing {freq} {stmt_type} for {ticker}")
+    try:
+        # Ensure index has a name
+        if stmt_df.index.name is None: stmt_df.index.name = 'item_label'
+        else: stmt_df.index.name = 'item_label' # Standardize
+
+        # Reset index to turn item labels into a column
+        long_df = stmt_df.reset_index()
+
+        # Melt the DataFrame
+        long_df = long_df.melt(
+            id_vars=['item_label'],
+            var_name='report_date', # Columns are the dates
+            value_name='value'
+        )
+
+        # Clean and Convert Data Types
+        # Convert report_date column headers (which might be Timestamps) to date objects
+        long_df['report_date'] = pd.to_datetime(long_df['report_date'], errors='coerce').dt.date
+        long_df['value'] = pd.to_numeric(long_df['value'], errors='coerce') # Value should be numeric (DOUBLE)
+
+        # Add Metadata Columns
+        long_df['ticker'] = ticker
+        long_df['frequency'] = freq
+        long_df['statement_type'] = stmt_type
+        long_df['fetch_timestamp'] = fetch_ts
+
+        # Drop rows only if essential PK components are missing
+        # Keep rows where 'value' is NaN as per requirement
+        pk_cols = ['ticker', 'report_date', 'frequency', 'item_label']
+        long_df.dropna(subset=[col for col in pk_cols if col in long_df.columns], inplace=True)
+
+        if long_df.empty:
+            logger.warning(f"No valid rows after melting/cleaning {freq} {stmt_type} for {ticker}")
+            return None
+
+        # Select and order columns for the database
+        db_cols = ['ticker', 'report_date', 'frequency', 'statement_type', 'item_label', 'fetch_timestamp', 'value']
+        final_df = long_df[[col for col in db_cols if col in long_df.columns]].copy()
+
+        return final_df
+
+    except Exception as e:
+        logger.error(f"Failed to parse {freq} {stmt_type} for {ticker}: {e}", exc_info=True)
+        return None
+
+
+# --- Orchestration (Updated to include parsing) ---
+
+def gather_ticker_info(tickers: List[str], logger: logging.Logger):
+    """
+    Iterates through tickers, fetches all domains, and parses the data.
+    Prints summaries of parsed data for verification.
+    """
+    logger.info(f"Starting Full Info gathering & parsing for {len(tickers)} tickers.")
+    # Store parsed results per ticker
+    all_parsed_data: Dict[str, Dict[str, Optional[pd.DataFrame]]] = {}
+
+    for ticker_symbol in tickers:
+        logger.info(f"--- Processing ticker: {ticker_symbol} ---")
+        raw_results = {} # Store raw fetched data for parsing
+        parsed_dfs: Dict[str, Optional[pd.DataFrame]] = {} # Store parsed DataFrames
+        fetch_ts = datetime.now(timezone.utc) # Consistent timestamp for this ticker's fetch cycle
 
         try:
-            ticker_obj = yf.Ticker(ticker)
+            ticker_obj = yf.Ticker(ticker_symbol)
 
             # --- Fetch Phase ---
-            # Fetch Profile, ISIN & Metrics
-            needs_profile_fetch = True; last_fetch_ts = profile_timestamps.get(ticker)
-            if last_fetch_ts and update_profile_if_older_than_days >= 0 and (datetime.now(timezone.utc) - last_fetch_ts) < timedelta(days=update_profile_if_older_than_days): needs_profile_fetch = False; logging.debug(f"Skip profile fetch {ticker}.")
-            if needs_profile_fetch:
-                info_dict = fetch_company_info(ticker_obj); fetch_results['info'] = info_dict is not None
-                if info_dict is None: fetch_errors_count += 1; log_info_fetch_error(write_conn, None, ticker, 'Info Fetch Error', 'fetch_company_info None')
-                else:
-                    try: # Prepare DFs
-                        isin = fetch_isin(ticker_obj); fetch_results['isin'] = isin is not None
-                        if isin is None: fetch_errors_count += 1
-                        db_prof_cols = get_db_columns(write_conn, PROFILE_TABLE_NAME); prof_data = {k: info_dict.get(k) for k in db_prof_cols if k not in ['fetch_timestamp', 'cik', 'isin']}; prof_data['ticker'] = ticker; prof_data['fetch_timestamp'] = datetime.now(timezone.utc); prof_data['isin'] = isin
-                        try: prof_data['cik'] = write_conn.execute("SELECT cik FROM tickers WHERE ticker=? LIMIT 1", [ticker]).fetchone()[0]
-                        except: prof_data['cik'] = None
-                        profile_df = pd.DataFrame([prof_data])
-                        db_met_cols = get_db_columns(write_conn, METRICS_TABLE_NAME); met_data = {k: info_dict.get(k) for k in db_met_cols if k != 'fetch_date'}; met_data['ticker'] = ticker; met_data['fetch_date'] = date.today()
-                        for date_key in ['exDividendDate']:
-                            if date_key in met_data and isinstance(met_data[date_key], (int, float)):
-                                try: met_data[date_key] = datetime.fromtimestamp(met_data[date_key], timezone.utc).date()
-                                except (TypeError, ValueError, OSError) as de: logging.warning(f"Epoch conv fail {date_key}({met_data[date_key]}) {ticker}: {de}"); met_data[date_key] = None
-                            elif date_key in met_data and not isinstance(met_data[date_key], (date, type(None))):
-                                try: met_data[date_key] = pd.to_datetime(met_data[date_key]).date()
-                                except: met_data[date_key] = None
-                        metrics_df = pd.DataFrame([met_data])
-                        fetch_results['metrics'] = True # Mark as success if prep doesn't fail
-                    except Exception as prep_e: logging.error(f"Error prep profile/metrics {ticker}: {prep_e}", exc_info=True); fetch_errors_count += 1; log_info_fetch_error(write_conn, None, ticker, 'Data Prep Error', f'Failed prep profile/metrics: {prep_e}'); profile_df, metrics_df = None, None; fetch_results['info']=False; fetch_results['metrics']=False
+            raw_results['profile'] = fetch_profile_metrics(ticker_obj, logger); time.sleep(0.1)
+            raw_results['actions'] = fetch_actions(ticker_obj, logger); time.sleep(YFINANCE_DELAY)
+            raw_results['financials'] = fetch_financials(ticker_obj, logger); time.sleep(YFINANCE_DELAY)
+            raw_results['holders'] = fetch_holders(ticker_obj, logger); time.sleep(YFINANCE_DELAY)
+            raw_results['recommendations'] = fetch_recommendations(ticker_obj, logger); time.sleep(YFINANCE_DELAY)
+            raw_results['calendar'] = fetch_calendar(ticker_obj, logger)
 
-            # Fetch Financials (Raw)
-            fin_map_keys = [ ('Income Statement', 'annual'), ('Income Statement', 'quarterly'), ('Balance Sheet', 'annual'), ('Balance Sheet', 'quarterly'), ('Cash Flow', 'annual'), ('Cash Flow', 'quarterly') ]
-            yfinance_stmt_map = {'Income Statement':'financials', 'Balance Sheet':'balance_sheet', 'Cash Flow':'cashflow'}
-            for stmt_type, freq in fin_map_keys:
-                 yfinance_type = yfinance_stmt_map[stmt_type]
-                 raw_df = fetch_financial_statement(ticker_obj, yfinance_type, freq)
-                 fetch_results[f'fin_{stmt_type}_{freq}'] = raw_df is not None
-                 if raw_df is None: fetch_errors_count += 1
-                 raw_fin_dfs[(stmt_type, freq)] = raw_df
+            # --- Parse Phase ---
+            logger.info(f"--- Parsing data for {ticker_symbol} ---")
 
-            # Fetch Actions, Calendar, Recs, Holders
-            actions_df = fetch_stock_actions(ticker_obj);         fetch_results['actions'] = actions_df is not None;       if actions_df is None: fetch_errors_count += 1
-            cal_df = fetch_calendar(ticker_obj);                 fetch_results['calendar'] = cal_df is not None;       if cal_df is None: fetch_errors_count += 1
-            recs_df = fetch_recommendations(ticker_obj);        fetch_results['recs'] = recs_df is not None;          if recs_df is None: fetch_errors_count += 1
-            major_df = fetch_major_holders(ticker_obj);         fetch_results['major_h'] = major_df is not None;      if major_df is None: fetch_errors_count += 1
-            inst_df = fetch_institutional_holders(ticker_obj);  fetch_results['inst_h'] = inst_df is not None;       if inst_df is None: fetch_errors_count += 1
-            mf_df = fetch_mutualfund_holders(ticker_obj);       fetch_results['mf_h'] = mf_df is not None;         if mf_df is None: fetch_errors_count += 1
+            # Parse Profile/Metrics
+            parsed_dfs['profile'] = parse_profile_metrics(raw_results.get('profile'), ticker_symbol, fetch_ts, logger)
+            if parsed_dfs['profile'] is not None: print(f"  Parsed Profile/Metrics: {parsed_dfs['profile'].shape}")
+            else: print("  Parsing Profile/Metrics FAILED or No Data")
 
-            # Determine if *any* data was fetched successfully
-            any_data_fetched = any(fetch_results.values())
+            # Parse Actions
+            parsed_dfs['actions'] = parse_actions(raw_results.get('actions'), ticker_symbol, logger)
+            if parsed_dfs['actions'] is not None: print(f"  Parsed Actions: {parsed_dfs['actions'].shape}")
+            else: print("  Parsing Actions FAILED or No Data")
 
-            # --- Load Phase ---
-            if not any_data_fetched: logging.warning(f"Skip load {ticker} due to all fetches failing or returning no data."); skipped_tickers_count += 1; continue
+            # Parse Financials (combine all statements into one long DataFrame)
+            all_fin_facts = []
+            if raw_results.get('financials'):
+                 fin_map = {'Income Statement': ['financials_annual', 'financials_quarterly'],
+                            'Balance Sheet': ['balance_sheet_annual', 'balance_sheet_quarterly'],
+                            'Cash Flow': ['cashflow_annual', 'cashflow_quarterly']}
+                 for stmt_type, keys in fin_map.items():
+                      for key in keys:
+                           raw_df = raw_results['financials'].get(key)
+                           freq = 'annual' if 'annual' in key else 'quarterly'
+                           parsed_stmt_df = parse_financial_statement(raw_df, ticker_symbol, stmt_type, freq, fetch_ts, logger)
+                           if parsed_stmt_df is not None:
+                               all_fin_facts.append(parsed_stmt_df)
+            if all_fin_facts:
+                parsed_dfs['financials'] = pd.concat(all_fin_facts, ignore_index=True)
+                print(f"  Parsed Financials (combined): {parsed_dfs['financials'].shape}")
+            else:
+                parsed_dfs['financials'] = None
+                print("  Parsing Financials FAILED or No Data")
 
-            try:
-                write_conn.begin(); load_failed_flag = False # Start transaction
-                # Load Profile & Metrics
-                if needs_profile_fetch and profile_df is not None and not profile_df.empty:
-                    if not load_generic_data(write_conn, profile_df, PROFILE_TABLE_NAME, ['ticker'], mode): load_failed_flag = True
-                if needs_profile_fetch and metrics_df is not None and not metrics_df.empty:
-                     if not load_generic_data(write_conn, metrics_df, METRICS_TABLE_NAME, ['ticker', 'fetch_date'], mode): load_failed_flag = True
+            # Parse Holders
+            holders_data = raw_results.get('holders')
+            if holders_data:
+                 parsed_dfs['major_holders'] = parse_major_holders(holders_data.get('major'), ticker_symbol, fetch_ts, logger)
+                 parsed_dfs['institutional_holders'] = parse_institutional_holders(holders_data.get('institutional'), ticker_symbol, fetch_ts, logger)
+                 parsed_dfs['mutualfund_holders'] = parse_mutual_fund_holders(holders_data.get('mutualfund'), ticker_symbol, fetch_ts, logger)
+                 print(f"  Parsed Major Holders: {parsed_dfs['major_holders'].shape if parsed_dfs['major_holders'] is not None else 'No Data'}")
+                 print(f"  Parsed Institutional Holders: {parsed_dfs['institutional_holders'].shape if parsed_dfs['institutional_holders'] is not None else 'No Data'}")
+                 print(f"  Parsed Mutual Fund Holders: {parsed_dfs['mutualfund_holders'].shape if parsed_dfs['mutualfund_holders'] is not None else 'No Data'}")
+            else:
+                 print("  Parsing Holders FAILED or No Data")
+                 parsed_dfs['major_holders'] = parsed_dfs['institutional_holders'] = parsed_dfs['mutualfund_holders'] = None
 
-                # Process and Load Financial Facts
-                for (stmt_type, freq), raw_df_fin in raw_fin_dfs.items():
-                    if raw_df_fin is not None:
-                        if not process_and_load_financial_facts(write_conn, raw_df_fin, ticker, stmt_type, freq, mode):
-                            load_failed_flag = True
+            # Parse Recommendations
+            parsed_dfs['recommendations'] = parse_recommendations(raw_results.get('recommendations'), ticker_symbol, fetch_ts, logger)
+            if parsed_dfs['recommendations'] is not None: print(f"  Parsed Recommendations: {parsed_dfs['recommendations'].shape}")
+            else: print("  Parsing Recommendations FAILED or No Data")
 
-                # Load Actions, Calendar, Recs, Holders (Only if data exists)
-                if actions_df is not None and not actions_df.empty:
-                    if not load_generic_data(write_conn, actions_df, ACTIONS_TABLE_NAME, ['ticker', 'action_date', 'action_type'], mode): load_failed_flag = True
-                if cal_df is not None and not cal_df.empty:
-                    if not load_generic_data(write_conn, cal_df, CALENDAR_TABLE_NAME, ['ticker', 'event_type'], mode): load_failed_flag = True
-                if recs_df is not None and not recs_df.empty:
-                    if not load_generic_data(write_conn, recs_df, RECS_TABLE_NAME, ['ticker', 'recommendation_timestamp', 'firm'], mode): load_failed_flag = True
-                if major_df is not None and not major_df.empty:
-                     if not load_generic_data(write_conn, major_df, HOLDERS_MAJOR_TABLE_NAME, ['ticker'], mode): load_failed_flag = True
-                if inst_df is not None and not inst_df.empty:
-                     if not load_generic_data(write_conn, inst_df, HOLDERS_INST_TABLE_NAME, ['ticker', 'report_date', 'holder'], mode): load_failed_flag = True
-                if mf_df is not None and not mf_df.empty:
-                     if not load_generic_data(write_conn, mf_df, HOLDERS_MF_TABLE_NAME, ['ticker', 'report_date', 'holder'], mode): load_failed_flag = True
+            # Parse Calendar
+            parsed_dfs['calendar'] = parse_calendar(raw_results.get('calendar'), ticker_symbol, fetch_ts, logger)
+            if parsed_dfs['calendar'] is not None: print(f"  Parsed Calendar: {parsed_dfs['calendar'].shape}")
+            else: print("  Parsing Calendar FAILED or No Data")
 
-                # Commit or Rollback
-                if not load_failed_flag: write_conn.commit(); processed_tickers_count += 1
-                else: logging.warning(f"Rolling back {ticker} due to load errors."); write_conn.rollback(); load_errors_count += 1; skipped_tickers_count += 1; log_info_fetch_error(write_conn, None, ticker, 'Load Failure', 'One or more loads failed.')
-            except Exception as load_tx_e:
-                 logging.error(f"Error load tx {ticker}: {load_tx_e}", exc_info=True); load_errors_count += 1; skipped_tickers_count += 1
-                 try: write_conn.rollback(); logging.info(f"Rolled back {ticker}.")
-                 except Exception as rb_e: logging.error(f"Rollback fail {ticker}: {rb_e}")
-                 log_info_fetch_error(write_conn, None, ticker, 'Load Transaction Error', str(load_tx_e))
-        except Exception as ticker_e: # Catch errors like invalid ticker instantiation
-            logging.error(f"Major error {ticker}: {ticker_e}", exc_info=True); fetch_errors_count +=1; skipped_tickers_count += 1; log_info_fetch_error(write_conn, None, ticker, 'Ticker Processing Error', str(ticker_e))
-            try: write_conn.rollback() # Ensure no transaction left open
-            except: pass
-        if YFINANCE_DELAY > 0: time.sleep(YFINANCE_DELAY)
 
-    # Final Cleanup & Summary
-    if write_conn:
-        try: write_conn.commit()
-        except: pass
-        try: write_conn.close(); logging.info("DB connection closed.")
-        except Exception as close_e: logging.error(f"Error closing DB: {close_e}")
-    end_run_time = time.time()
-    logging.info(f"--- Stock Info Pipeline Finished ---"); logging.info(f"Total Time: {end_run_time - start_run_time:.2f} sec")
-    logging.info(f"Tickers Attempted: {total_tickers_to_process}"); logging.info(f"Tickers OK: {processed_tickers_count}"); logging.info(f"Tickers Skip/Err: {skipped_tickers_count}")
-    logging.info(f"Fetch Errors: {fetch_errors_count}"); logging.info(f"Load Errors (Tickers w fail): {load_errors_count}"); logging.info(f"Check '{ERROR_TABLE_NAME}'.")
+            all_parsed_data[ticker_symbol] = parsed_dfs
+            logger.info(f"Finished parsing for {ticker_symbol}.")
 
-# --- Script Execution Control ---
+        except Exception as e:
+            logger.error(f"Unexpected error during processing for {ticker_symbol}: {e}", exc_info=True)
+            all_parsed_data[ticker_symbol] = {} # Mark as failed / no parsed data
+
+
+        # Apply delay between different tickers
+        logger.debug(f"Sleeping for {YFINANCE_DELAY} seconds before next ticker...")
+        time.sleep(YFINANCE_DELAY)
+
+    logger.info(f"Finished gathering and parsing for all sample tickers.")
+    # return all_parsed_data # Return the dictionary of parsed DataFrames
+
+
+# --- Main Execution ---
 if __name__ == "__main__":
-    run_stock_info_pipeline(
-        mode='initial_load',
-        target_tickers=['AAPL', 'MSFT', 'GOOG', 'NONEXISTENTTICKER'],
-        db_file_path_str=':memory:',
-        update_profile_if_older_than_days=-1 # Force profile fetch
-    )
-    logging.info("Script execution finished.")
+    try:
+        config = AppConfig(calling_script_path=Path(__file__))
+        logger.info(f"Config loaded. DB file (if needed later): {config.DB_FILE_STR}")
+    except SystemExit as e:
+        logger.critical(f"Configuration failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"Unexpected error loading config: {e}", exc_info=True)
+        sys.exit(1)
+
+    # Define a small sample of tickers for this skeleton run
+    sample_tickers = ['AAPL', 'MSFT', 'NVDA', 'NONEXISTENTTICKERXYZ', 'GSK']
+
+    logger.info(f"--- Starting Stock Info Gatherer (v3 - Step 7: Fetch & Parse) ---")
+    logger.info(f"Processing sample tickers: {sample_tickers}")
+
+    # Call the function to gather and parse the data
+    # parsed_results = gather_ticker_info(sample_tickers, logger) # Capture if needed
+    gather_ticker_info(sample_tickers, logger)
+
+    # TODO NEXT: Implement database setup and loading functions
+    # using the parsed DataFrames stored in 'parsed_results' (or generated within the loop)
+
+    logger.info("--- Stock Info Gatherer (v3 - Step 7) Finished ---")
