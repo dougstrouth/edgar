@@ -9,8 +9,8 @@ using yfinance. Stores data in respective DuckDB tables.
 Prioritizes correct syntax and implementation of agreed-upon logic.
 """
 
-import duckdb
-import pandas as pd
+from database_conn import ManagedDatabaseConnection, get_db_connection # Import both
+import duckdb # Keep original duckdb import if needed for types etc.import pandas as pd
 import yfinance as yf
 from pathlib import Path
 import logging
