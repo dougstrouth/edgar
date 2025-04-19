@@ -654,7 +654,7 @@ if __name__ == "__main__":
 
     # Default action when run directly: Append from last known date for all tickers
     run_stock_data_pipeline(
-        mode='initial_load',
+        mode='append',
         batch_size=DEFAULT_BATCH_SIZE,
         db_file_path=DEFAULT_DB_FILE
     )
