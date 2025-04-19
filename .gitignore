@@ -11,5 +11,5 @@ wheels/
 .env
 
 # logs
-.log
+*.log
 additional_resources/*
