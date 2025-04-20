@@ -1,180 +1,132 @@
 # -*- coding: utf-8 -*-
 """
-Stock Data Gatherer Script (v7)
+Stock Data Gatherer Script (Refactored for Utilities)
 
-Connects to EDGAR DuckDB, identifies CIKs and date ranges, maps CIKs
-to potentially MULTIPLE tickers using sec-cik-mapper, fetches historical
-stock data for ALL found tickers using yfinance, loads into DuckDB, and
-logs errors. Supports modes, batch loading, and error logging.
+Connects to EDGAR DuckDB using centralized database_conn utility.
+Identifies CIKs and date ranges, maps CIKs to potentially MULTIPLE tickers
+using sec-cik-mapper, fetches historical stock data for ALL found tickers
+using yfinance, loads into DuckDB, and logs errors.
+Supports modes, batch loading, and error logging.
+
+Uses:
+- config_utils.AppConfig for loading configuration from .env.
+- logging_utils.setup_logging for standardized logging.
+- database_conn.ManagedDatabaseConnection for DB connection management.
 """
+
+import logging # Keep for level constants
+import os
+import sys
+import time
+from pathlib import Path
+from datetime import datetime, date, timezone, timedelta
+from typing import Optional, Dict, List, Set, Tuple
 
 import duckdb
 import pandas as pd
 import yfinance as yf
 from sec_cik_mapper import StockMapper
-from pathlib import Path
-import logging
-import os
-from dotenv import load_dotenv
-import sys
-import time
-from datetime import datetime, date, timezone, timedelta
+# from dotenv import load_dotenv # No longer needed here
 from tqdm import tqdm
-from typing import Optional, Dict, List, Set, Tuple
 
-# --- Configuration from .env ---
-script_dir = Path(__file__).resolve().parent
-dotenv_path = script_dir / '.env'
-if not dotenv_path.is_file():
-    print(f"ERROR: .env file not found at {dotenv_path}", file=sys.stderr)
-    sys.exit(1)
-load_dotenv(dotenv_path=dotenv_path)
+# --- Import Utilities ---
+from config_utils import AppConfig                 # Import configuration loader
+from logging_utils import setup_logging            # Import logging setup function
+from database_conn import ManagedDatabaseConnection # Use context manager
 
-try:
-    DEFAULT_DB_FILE = Path(os.environ['DB_FILE']).resolve()
-except KeyError as e:
-    sys.exit(f"ERROR: Missing required .env variable: {e}")
-
-# --- Logging Setup ---
-log_file_path = script_dir / "stock_data_gatherer.log"
-log_file_path.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(funcName)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path),
-        logging.StreamHandler()
-    ]
-)
+# --- Setup Logging ---
+SCRIPT_NAME = Path(__file__).stem
+LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
+logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # --- Constants ---
 STOCK_TABLE_NAME = "stock_history"
 ERROR_TABLE_NAME = "stock_fetch_errors"
-YFINANCE_DELAY = 0.5 # Optional delay (seconds)
-DEFAULT_BATCH_SIZE = 50 # Number of TICKERS to process per DB batch load
+YFINANCE_DELAY = 0.5
+DEFAULT_BATCH_SIZE = 75
 
-# --- Database Functions ---
-# Start: DB Functions (unchanged from v5/v6) ---
-def connect_db(db_path: Path, read_only: bool = True) -> Optional[duckdb.DuckDBPyConnection]:
-    """Connects to the DuckDB database file."""
-    if not db_path.is_file():
-        logging.error(f"Database file not found at: {db_path}")
-        return None
-    try:
-        conn = duckdb.connect(database=str(db_path), read_only=read_only)
-        logging.info(f"Successfully connected to database: {db_path} (Read-Only: {read_only})")
-        return conn
-    except Exception as e:
-        logging.error(f"Failed to connect to database {db_path}: {e}", exc_info=True)
-        return None
-
-def get_companies_and_xbrl_dates(con: duckdb.DuckDBPyConnection, target_ciks: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Queries for CIKs and their XBRL fact date ranges.
-    Optionally filters for a specific list of CIKs.
-    Returns DataFrame with columns: cik, min_date, max_date
-    """
-    logging.info("Querying database for CIKs and XBRL fact date ranges...")
-    # This query identifies CIKs present in the companies table that also have fact data
+# --- Database Functions (Updated to use logger instance) ---
+def get_companies_and_xbrl_dates(
+    con: duckdb.DuckDBPyConnection,
+    logger: logging.Logger, # Pass logger
+    target_ciks: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """Queries the DB for CIKs and their min/max XBRL fact dates."""
+    logger.info("Querying database for CIKs and XBRL fact date ranges...")
     base_query = """
     WITH XbrlDates AS (
-        SELECT
-            f.cik,
-            MIN(f.period_start_date) AS min_start_date,
-            MAX(f.period_end_date) AS max_end_date
-        FROM xbrl_facts f
-        WHERE f.period_start_date IS NOT NULL OR f.period_end_date IS NOT NULL
-        GROUP BY f.cik
+        SELECT f.cik, MIN(f.period_start_date) AS min_start_date, MAX(f.period_end_date) AS max_end_date
+        FROM xbrl_facts f WHERE f.period_start_date IS NOT NULL OR f.period_end_date IS NOT NULL GROUP BY f.cik
     )
-    SELECT DISTINCT -- Ensure unique CIKs if companies table has duplicates (shouldn't happen)
-        c.cik,
-        -- Use the earliest of min_start or max_end (if start is missing) as overall min
-        COALESCE(xd.min_start_date, xd.max_end_date) as min_date,
-        -- Use the latest of max_end or min_start (if end is missing) as overall max
-        COALESCE(xd.max_end_date, xd.min_start_date) as max_date
-    FROM companies c
-    JOIN XbrlDates xd ON c.cik = xd.cik -- Only include CIKs with facts
+    SELECT DISTINCT c.cik, COALESCE(xd.min_start_date, xd.max_end_date) as min_date, COALESCE(xd.max_end_date, xd.min_start_date) as max_date
+    FROM companies c JOIN XbrlDates xd ON c.cik = xd.cik
     WHERE (xd.min_start_date IS NOT NULL OR xd.max_end_date IS NOT NULL)
     """
     params = []
-    if target_ciks:
-        placeholders = ', '.join(['?'] * len(target_ciks))
-        # Filter on the CIK from the companies table
-        base_query += f" AND c.cik IN ({placeholders})"
-        params.extend(target_ciks)
-
-    base_query += " ORDER BY c.cik;" # Add ordering for consistency
-
+    if target_ciks: base_query += f" AND c.cik IN ({','.join(['?'] * len(target_ciks))})"; params.extend(target_ciks)
+    base_query += " ORDER BY c.cik;"
     try:
         df = con.execute(base_query, params).fetchdf()
         if not df.empty:
-            df['min_date'] = pd.to_datetime(df['min_date']).dt.date
-            df['max_date'] = pd.to_datetime(df['max_date']).dt.date
-            logging.info(f"Found {len(df)} CIKs with XBRL fact date ranges matching criteria.")
-            logging.debug(f"Sample CIK Date Ranges (first 5):\n{df.head().to_string()}")
-        else:
-             logging.warning("No CIKs found with XBRL date ranges matching criteria.")
+            df['min_date'] = pd.to_datetime(df['min_date'], errors='coerce').dt.date
+            df['max_date'] = pd.to_datetime(df['max_date'], errors='coerce').dt.date
+            # Drop rows where date conversion failed
+            df.dropna(subset=['min_date', 'max_date'], inplace=True)
+            logger.info(f"Found {len(df)} CIKs with valid XBRL dates matching criteria.")
+            logger.debug(f"Sample CIK Dates:\n{df.head().to_string()}")
+        else: logger.warning("No CIKs found with XBRL dates matching criteria.")
         return df
     except Exception as e:
-        logging.error(f"Failed to query company/XBRL date data: {e}", exc_info=True)
+        logger.error(f"Failed query company/XBRL dates: {e}", exc_info=True)
         return pd.DataFrame()
 
-def get_ticker_date_range(con: duckdb.DuckDBPyConnection, ticker: str) -> Optional[Tuple[str, date, date]]:
-     """Gets the CIK and date range for a specific ticker."""
-     logging.debug(f"Getting date range for specific ticker: {ticker}")
+def get_ticker_date_range(
+    con: duckdb.DuckDBPyConnection,
+    ticker: str,
+    logger: logging.Logger # Pass logger
+) -> Optional[Tuple[str, date, date]]:
+     """Gets the CIK and overall min/max XBRL date range for a specific ticker."""
+     logger.debug(f"Getting date range for specific ticker: {ticker}")
      query = """
         WITH XbrlDates AS (
-            SELECT
-                f.cik,
-                MIN(f.period_start_date) AS min_start_date,
-                MAX(f.period_end_date) AS max_end_date
-            FROM xbrl_facts f
-            WHERE f.period_start_date IS NOT NULL OR f.period_end_date IS NOT NULL
-            GROUP BY f.cik
+            SELECT f.cik, MIN(f.period_start_date) AS min_start_date, MAX(f.period_end_date) AS max_end_date
+            FROM xbrl_facts f WHERE f.period_start_date IS NOT NULL OR f.period_end_date IS NOT NULL GROUP BY f.cik
         )
-        SELECT
-            t.cik,
-            COALESCE(xd.min_start_date, xd.max_end_date) as min_date,
-            COALESCE(xd.max_end_date, xd.min_start_date) as max_date
-        FROM tickers t
-        JOIN XbrlDates xd ON t.cik = xd.cik
-        WHERE t.ticker = ?
-        LIMIT 1;
-     """
+        SELECT t.cik, COALESCE(xd.min_start_date, xd.max_end_date) as min_date, COALESCE(xd.max_end_date, xd.min_start_date) as max_date
+        FROM tickers t JOIN XbrlDates xd ON t.cik = xd.cik WHERE t.ticker = ? LIMIT 1;"""
      try:
          result = con.execute(query, [ticker]).fetchone()
          if result:
              cik, min_d, max_d = result
-             min_date = pd.to_datetime(min_d).date() if pd.notna(min_d) else None
-             max_date = pd.to_datetime(max_d).date() if pd.notna(max_d) else None
-             if cik and min_date and max_date:
-                 return str(cik), min_date, max_date
-             else:
-                 logging.warning(f"Found ticker {ticker} but missing CIK or date range (CIK: {cik}, Min: {min_date}, Max: {max_date})")
-                 return None
-         else:
-             logging.warning(f"Ticker {ticker} not found or has no associated fact dates.")
-             return None
+             min_date = pd.to_datetime(min_d, errors='coerce').date() if pd.notna(min_d) else None
+             max_date = pd.to_datetime(max_d, errors='coerce').date() if pd.notna(max_d) else None
+             if cik and min_date and max_date: return str(cik), min_date, max_date
+             else: logger.warning(f"Found ticker {ticker} missing CIK/date (CIK: {cik}, Min: {min_date}, Max: {max_date})"); return None
+         else: logger.warning(f"Ticker {ticker} not found or no fact dates."); return None
      except Exception as e:
-         logging.error(f"Failed to get date range for ticker {ticker}: {e}", exc_info=True)
+         logger.error(f"Failed get date range ticker {ticker}: {e}", exc_info=True)
          return None
 
-
-def get_latest_stock_dates(con: duckdb.DuckDBPyConnection, target_tickers: Optional[List[str]] = None) -> Dict[str, date]:
-    """Queries for the latest date present for each ticker in stock_history."""
-    logging.info("Querying latest existing stock data dates...")
-    latest_dates = {}
-    base_query = f"SELECT ticker, MAX(date) as max_date FROM {STOCK_TABLE_NAME}"
-    params = []
-    if target_tickers:
-        placeholders = ', '.join(['?'] * len(target_tickers))
-        base_query += f" WHERE ticker IN ({placeholders})"
-        params.extend(target_tickers)
-    base_query += " GROUP BY ticker;"
-
-    try:
+def get_latest_stock_dates(
+    con: duckdb.DuckDBPyConnection,
+    logger: logging.Logger, # Pass logger
+    target_tickers: Optional[List[str]] = None
+) -> Dict[str, date]:
+    """Queries the DB for the latest stock date recorded for each ticker."""
+    logger.info("Querying latest existing stock data dates...")
+    latest_dates = {}; table_exists = False
+    try: # Check if table exists before querying
         tables = con.execute("SHOW TABLES;").fetchall()
-        if any(STOCK_TABLE_NAME.lower() == t[0].lower() for t in tables):
+        if any(STOCK_TABLE_NAME.lower() == t[0].lower() for t in tables): table_exists = True
+        else: logger.warning(f"Table '{STOCK_TABLE_NAME}' does not exist. Cannot get latest dates.")
+    except Exception as e: logger.error(f"Failed checking existence of {STOCK_TABLE_NAME}: {e}")
+
+    if table_exists:
+        base_query = f"SELECT ticker, MAX(date) as max_date FROM {STOCK_TABLE_NAME}"
+        params = []
+        if target_tickers: base_query += f" WHERE ticker IN ({','.join(['?'] * len(target_tickers))})"; params.extend(target_tickers)
+        base_query += " GROUP BY ticker;"
+        try:
              results = con.execute(base_query, params).fetchall()
              for ticker, max_date_val in results:
                   if max_date_val:
@@ -183,480 +135,438 @@ def get_latest_stock_dates(con: duckdb.DuckDBPyConnection, target_tickers: Optio
                     elif isinstance(max_date_val, date): max_date = max_date_val
                     else:
                         try: max_date = pd.to_datetime(max_date_val).date()
-                        except: logging.warning(f"Could not convert max_date {max_date_val} to date for {ticker}")
+                        except: logger.warning(f"Could not convert max_date {max_date_val} for {ticker}")
                     if max_date: latest_dates[ticker] = max_date
-
-             logging.info(f"Found latest dates for {len(latest_dates)} tickers already in DB.")
-        else:
-             logging.warning(f"Table '{STOCK_TABLE_NAME}' does not exist. Cannot get latest dates.")
-    except Exception as e:
-        logging.error(f"Failed to query latest stock dates: {e}", exc_info=True)
+             logger.info(f"Found latest dates for {len(latest_dates)} tickers already in DB.")
+        except Exception as e: logger.error(f"Failed query latest stock dates: {e}", exc_info=True)
     return latest_dates
 
-def setup_tables(con: duckdb.DuckDBPyConnection):
+def setup_tables(con: duckdb.DuckDBPyConnection, logger: logging.Logger): # Pass logger
     """Creates the stock_history and stock_fetch_errors tables if they don't exist."""
-    logging.info(f"Setting up database tables '{STOCK_TABLE_NAME}' and '{ERROR_TABLE_NAME}'")
-    create_stock_sql = f"""
-    CREATE TABLE IF NOT EXISTS {STOCK_TABLE_NAME} (
-        ticker          VARCHAR NOT NULL COLLATE NOCASE,
-        date            DATE NOT NULL,
-        open            DOUBLE,
-        high            DOUBLE,
-        low             DOUBLE,
-        close           DOUBLE,
-        adj_close       DOUBLE,
-        volume          BIGINT,
-        PRIMARY KEY (ticker, date)
-    );
-    """
-    create_error_sql = f"""
-    CREATE TABLE IF NOT EXISTS {ERROR_TABLE_NAME} (
-        cik             VARCHAR,
-        ticker          VARCHAR COLLATE NOCASE,
-        error_timestamp TIMESTAMPTZ NOT NULL,
-        error_type      VARCHAR NOT NULL,
-        error_message   VARCHAR,
-        start_date_req  DATE,
-        end_date_req    DATE
-    );
-    """
+    logger.info(f"Setting up tables '{STOCK_TABLE_NAME}' and '{ERROR_TABLE_NAME}'")
+    create_stock_sql = f"""CREATE TABLE IF NOT EXISTS {STOCK_TABLE_NAME} (ticker VARCHAR NOT NULL COLLATE NOCASE, date DATE NOT NULL, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, adj_close DOUBLE, volume BIGINT, PRIMARY KEY (ticker, date));"""
+    create_error_sql = f"""CREATE TABLE IF NOT EXISTS {ERROR_TABLE_NAME} (cik VARCHAR, ticker VARCHAR COLLATE NOCASE, error_timestamp TIMESTAMPTZ NOT NULL, error_type VARCHAR NOT NULL, error_message VARCHAR, start_date_req DATE, end_date_req DATE);"""
     try:
-        con.execute(create_stock_sql)
-        logging.info(f"Table '{STOCK_TABLE_NAME}' created or already exists.")
-        con.execute(create_error_sql)
-        logging.info(f"Table '{ERROR_TABLE_NAME}' created or already exists.")
-    except Exception as e:
-        logging.error(f"Failed to create tables: {e}", exc_info=True)
-        raise
+        con.execute(create_stock_sql); logger.info(f"Table '{STOCK_TABLE_NAME}' OK.")
+        con.execute(create_error_sql); logger.info(f"Table '{ERROR_TABLE_NAME}' OK.")
+    except Exception as e: logger.error(f"Failed create tables: {e}", exc_info=True); raise
 
-def drop_stock_tables(con: duckdb.DuckDBPyConnection):
+def drop_stock_tables(con: duckdb.DuckDBPyConnection, logger: logging.Logger): # Pass logger
     """Drops the stock_history and stock_fetch_errors tables."""
-    logging.warning(f"Dropping tables '{STOCK_TABLE_NAME}' and '{ERROR_TABLE_NAME}'...")
+    logger.warning(f"Dropping tables '{STOCK_TABLE_NAME}' and '{ERROR_TABLE_NAME}'...")
     try:
-        con.execute(f"DROP TABLE IF EXISTS {STOCK_TABLE_NAME};")
-        logging.info(f"Table '{STOCK_TABLE_NAME}' dropped.")
-        con.execute(f"DROP TABLE IF EXISTS {ERROR_TABLE_NAME};")
-        logging.info(f"Table '{ERROR_TABLE_NAME}' dropped.")
-    except Exception as e:
-        logging.error(f"Failed to drop tables: {e}", exc_info=True)
-        raise
+        con.execute(f"DROP TABLE IF EXISTS {STOCK_TABLE_NAME};"); logger.info(f"Table '{STOCK_TABLE_NAME}' dropped.")
+        con.execute(f"DROP TABLE IF EXISTS {ERROR_TABLE_NAME};"); logger.info(f"Table '{ERROR_TABLE_NAME}' dropped.")
+    except Exception as e: logger.error(f"Failed drop tables: {e}", exc_info=True); raise
 
-def clear_stock_tables(con: duckdb.DuckDBPyConnection):
-    """Clears all data from the stock_history and stock_fetch_errors tables."""
-    logging.warning(f"Clearing all data from tables '{STOCK_TABLE_NAME}' and '{ERROR_TABLE_NAME}'...")
+def clear_stock_tables(con: duckdb.DuckDBPyConnection, logger: logging.Logger): # Pass logger
+    """Deletes all data from the stock_history and stock_fetch_errors tables."""
+    logger.warning(f"Clearing data from '{STOCK_TABLE_NAME}' and '{ERROR_TABLE_NAME}'...")
     try:
-        tables = con.execute("SHOW TABLES;").fetchall()
-        if any(STOCK_TABLE_NAME.lower() == t[0].lower() for t in tables):
-            con.execute(f"DELETE FROM {STOCK_TABLE_NAME};")
-            logging.info(f"All data deleted from '{STOCK_TABLE_NAME}'.")
-        else:
-             logging.warning(f"Table '{STOCK_TABLE_NAME}' does not exist, skipping delete.")
+        tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+        if STOCK_TABLE_NAME.lower() in tables: con.execute(f"DELETE FROM {STOCK_TABLE_NAME};"); logger.info(f"Cleared {STOCK_TABLE_NAME}.")
+        else: logger.warning(f"Table {STOCK_TABLE_NAME} not found.")
+        if ERROR_TABLE_NAME.lower() in tables: con.execute(f"DELETE FROM {ERROR_TABLE_NAME};"); logger.info(f"Cleared {ERROR_TABLE_NAME}.")
+        else: logger.warning(f"Table {ERROR_TABLE_NAME} not found.")
+    except Exception as e: logger.error(f"Failed clear tables: {e}", exc_info=True); raise
 
-        if any(ERROR_TABLE_NAME.lower() == t[0].lower() for t in tables):
-             con.execute(f"DELETE FROM {ERROR_TABLE_NAME};")
-             logging.info(f"All data deleted from '{ERROR_TABLE_NAME}'.")
-        else:
-             logging.warning(f"Table '{ERROR_TABLE_NAME}' does not exist, skipping delete.")
-
-    except Exception as e:
-        logging.error(f"Failed to clear tables: {e}", exc_info=True)
-        raise
-
-def log_fetch_error(con: duckdb.DuckDBPyConnection, cik: Optional[str], ticker: Optional[str], error_type: str, message: str, start_date: Optional[str] = None, end_date: Optional[str] = None):
-    """Logs an error record to the stock_fetch_errors table."""
+def log_fetch_error(
+    con: duckdb.DuckDBPyConnection,
+    logger: logging.Logger, # Pass logger
+    cik: Optional[str],
+    ticker: Optional[str],
+    error_type: str,
+    message: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """Logs a fetch error to the database and the logger."""
     timestamp = datetime.now(timezone.utc)
-    logging.warning(f"Logging error: CIK={cik}, Ticker={ticker}, Type={error_type}, Msg={message}")
+    # Log to standard logger first
+    logger.warning(f"Log err: CIK={cik}, Ticker={ticker}, Type={error_type}, Msg={message}")
+    # Log to database
     try:
         start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
         end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
-
-        con.execute(
-            f"INSERT INTO {ERROR_TABLE_NAME} (cik, ticker, error_timestamp, error_type, error_message, start_date_req, end_date_req) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [cik, ticker, timestamp, error_type, message, start_date_obj, end_date_obj]
-        )
+        # Prepare data tuple, handle potential None values gracefully
+        params = [
+            cik, ticker, timestamp, error_type, message, start_date_obj, end_date_obj
+        ]
+        con.execute(f"INSERT INTO {ERROR_TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?)", params)
+    except duckdb.Error as db_err:
+         # Check if error is due to transaction context (already rolled back maybe)
+        if "TransactionContext Error" in str(db_err) or "Connection has been closed" in str(db_err):
+            logger.error(f"Could not log DB error for Ticker {ticker} (transaction likely aborted): {db_err}")
+        else:
+            logger.error(f"CRITICAL DB error inserting error log CIK {cik}/Ticker {ticker}: {db_err}", exc_info=True)
     except Exception as e:
-        logging.error(f"CRITICAL: Failed to insert error record into {ERROR_TABLE_NAME} for CIK {cik}/Ticker {ticker}: {e}", exc_info=True)
+        logger.error(f"CRITICAL unexpected error inserting error log CIK {cik}/Ticker {ticker}: {e}", exc_info=True)
 
 
-def load_stock_data_batch(con: duckdb.DuckDBPyConnection, stock_dfs: List[pd.DataFrame], insert_mode: str = "REPLACE"):
-    """
-    Loads a batch of fetched stock data DataFrames into the DuckDB table.
-    Handles different insertion modes.
-    """
-    if not stock_dfs:
-        logging.info("No stock dataframes in batch to load.")
-        return True
-
+def load_stock_data_batch(
+    con: duckdb.DuckDBPyConnection,
+    logger: logging.Logger, # Pass logger
+    stock_dfs: List[pd.DataFrame],
+    insert_mode: str = "REPLACE"
+) -> bool:
+    """Loads a batch of stock data DataFrames into the database."""
+    if not stock_dfs: logger.info("No DFs in batch."); return True
     try:
         full_batch_df = pd.concat(stock_dfs, ignore_index=True)
     except Exception as concat_e:
-         logging.error(f"Error concatenating DataFrames for batch load: {concat_e}", exc_info=True)
-         # Log error for tickers in the batch
-         for df in stock_dfs:
-              if not df.empty:
-                   log_fetch_error(con, None, df['ticker'].iloc[0], 'Load Error', f'Failed during pd.concat: {concat_e}')
-         return False # Indicate failure
+        logger.error(f"Error concat DFs: {concat_e}", exc_info=True)
+        # Log error for each ticker represented in the failed batch
+        for df in stock_dfs:
+            if not df.empty and 'ticker' in df.columns:
+                ticker = df['ticker'].iloc[0]
+                log_fetch_error(con, logger, None, ticker, 'Load Error', f'Concat fail: {concat_e}')
+        return False
 
-    if full_batch_df.empty:
-        logging.warning("Concatenated batch DataFrame is empty, skipping database load.")
-        return True
+    if full_batch_df.empty: logger.warning("Batch DF empty after concat."); return True
 
-    logging.info(f"Attempting to load batch of {len(full_batch_df)} stock records ({len(stock_dfs)} tickers) into '{STOCK_TABLE_NAME}' using mode '{insert_mode}'...")
+    # Ensure date column is in correct format (object suitable for DuckDB date)
+    if 'date' in full_batch_df.columns:
+        full_batch_df['date'] = pd.to_datetime(full_batch_df['date']).dt.date
+
+    # Convert Pandas NA/NaT to None for DuckDB compatibility
+    load_df_final = full_batch_df.astype(object).where(pd.notnull(full_batch_df), None)
+
+    logger.info(f"Loading batch {len(load_df_final)} records ({len(stock_dfs)} tickers) Mode '{insert_mode}'...")
+    reg_name = f'stock_batch_df_reg_{int(time.time()*1000)}' # Unique registration name
     try:
-        con.register('stock_batch_df_reg', full_batch_df)
-
+        con.register(reg_name, load_df_final)
+        # Use INSERT OR REPLACE (for append) or simple INSERT (for full_refresh initial load)
         if insert_mode.upper() == "REPLACE":
-             sql = f"INSERT OR REPLACE INTO {STOCK_TABLE_NAME} SELECT * FROM stock_batch_df_reg"
-        elif insert_mode.upper() == "IGNORE":
-             sql = f"INSERT OR IGNORE INTO {STOCK_TABLE_NAME} SELECT * FROM stock_batch_df_reg"
-        else:
-             sql = f"INSERT INTO {STOCK_TABLE_NAME} SELECT * FROM stock_batch_df_reg"
+            sql = f"INSERT OR REPLACE INTO {STOCK_TABLE_NAME} SELECT * FROM {reg_name}"
+        elif insert_mode.upper() == "IGNORE": # Added ignore option
+            sql = f"INSERT OR IGNORE INTO {STOCK_TABLE_NAME} SELECT * FROM {reg_name}"
+        else: # Default to plain INSERT (used for full_refresh)
+             sql = f"INSERT INTO {STOCK_TABLE_NAME} SELECT * FROM {reg_name}"
 
         con.execute(sql)
-        con.unregister('stock_batch_df_reg')
-        logging.info(f"Successfully loaded/updated batch of stock records.")
+        con.unregister(reg_name)
+        logger.info(f"Batch load successful.")
         return True
     except Exception as e:
-        logging.error(f"Database error during batch stock data insertion: {e}", exc_info=True)
-        try: con.unregister('stock_batch_df_reg')
+        logger.error(f"DB err batch insert: {e}", exc_info=True)
+        try: con.unregister(reg_name) # Attempt to unregister even on failure
         except: pass
-         # Log error for tickers in the batch
-        for ticker in full_batch_df['ticker'].unique():
-             log_fetch_error(con, None, ticker, 'Load Error', f'Batch insert failed: {e}')
+        # Log error for each ticker in the failed batch
+        for ticker in load_df_final['ticker'].unique():
+            log_fetch_error(con, logger, None, ticker, 'Load Error', f'Batch insert failed: {e}')
         return False
-# --- End: DB Functions ---
 
-# --- Stock Data Fetching ---
-def fetch_stock_history(ticker: str, start_date: str, end_date: str) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
-    """Fetches historical stock data using yfinance."""
-    logging.debug(f"Fetching stock data for {ticker} from {start_date} to {end_date}")
+# --- Stock Data Fetching (Updated to use logger) ---
+def fetch_stock_history(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    logger: logging.Logger # Pass logger
+) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """Fetches stock history using yfinance for a given ticker and date range."""
+    logger.debug(f"Fetching {ticker} from {start_date} to {end_date}")
     try:
         start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
         end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
 
         if start_dt > end_dt:
-             warning_msg = f"Start date {start_date} is after end date {end_date} for {ticker}. Skipping fetch."
-             logging.warning(warning_msg)
-             return None, warning_msg
+            logger.warning(f"Start date > End date: {start_date} > {end_date} for {ticker}. Skipping fetch.")
+            return None, "Start date after end date"
 
+        # Fetch data including the end_date by adding one day to the end param
         stock = yf.Ticker(ticker)
-        # yfinance end date is exclusive, add 1 day to include the end_date
         history = stock.history(start=start_date, end=(end_dt + timedelta(days=1)).strftime('%Y-%m-%d'), interval="1d")
 
         if history.empty:
-            warning_msg = f"No data returned by yfinance for {ticker} in range {start_date} to {end_date}."
-            logging.warning(warning_msg)
-            return None, warning_msg
+            logger.warning(f"No data returned from yfinance for {ticker} in range {start_date} to {end_date}.")
+            return None, "No data from yfinance"
 
+        # Prepare DataFrame
         history.reset_index(inplace=True)
         history['ticker'] = ticker
+
+        # Rename columns
         history.rename(columns={
             'Date': 'date', 'Open': 'open', 'High': 'high', 'Low': 'low',
             'Close': 'close', 'Adj Close': 'adj_close', 'Volume': 'volume'
         }, inplace=True)
 
-        history = history[pd.to_datetime(history['date'], errors='coerce').notna()]
-        if history.empty: return None, "Date parsing removed all rows." # Handle case where dates become invalid
-        history['date'] = pd.to_datetime(history['date']).dt.date
+        # Convert Date column to date objects, coercing errors
+        history['date'] = pd.to_datetime(history['date'], errors='coerce').dt.date
+        history = history[history['date'].notna()] # Remove rows where date conversion failed
 
+        if history.empty:
+             logger.warning(f"Date parsing removed all rows for {ticker} ({start_date} to {end_date}).")
+             return None, "Date parsing removed all rows"
+
+        # Ensure all required DB columns exist
         db_columns = ['ticker', 'date', 'open', 'high', 'low', 'close', 'adj_close', 'volume']
         for col in db_columns:
-            if col not in history.columns: history[col] = pd.NA
-        history['volume'] = pd.to_numeric(history['volume'], errors='coerce').astype('Int64')
-        history = history[history['date'].notna()]
+            if col not in history.columns: history[col] = pd.NA # Use Pandas NA
 
-        # Filter history >= start_dt and <= end_dt (inclusive)
+        # Convert volume to Int64 (nullable integer)
+        history['volume'] = pd.to_numeric(history['volume'], errors='coerce').astype('Int64')
+
+        # Filter final data to the exact requested date range
         history = history[(history['date'] >= start_dt) & (history['date'] <= end_dt)]
 
-        if history.empty: # Check again after date filtering
-             warning_msg = f"Data returned by yfinance for {ticker} was outside requested range {start_date} to {end_date}."
-             logging.warning(warning_msg)
-             return None, warning_msg
+        if history.empty:
+            logger.warning(f"Filtering removed all rows for {ticker}. Data might be outside requested range {start_date}-{end_date}.")
+            return None, "Data outside requested range after filtering"
 
-        return history[db_columns], None
+        return history[db_columns], None # Return only necessary columns
 
     except Exception as e:
-        error_msg = f"yfinance fetch failed for {ticker}: {type(e).__name__} - {e}"
-        logging.error(error_msg, exc_info=False)
+        error_msg = f"yfinance fetch failed {ticker}: {type(e).__name__}-{e}"
+        logger.error(error_msg, exc_info=False) # Log full traceback usually not needed for yfinance errors
         return None, error_msg
-# --- End: Stock Data Fetching ---
 
 
-# --- Main Pipeline Function ---
+# --- Main Pipeline Function (Refactored to use logger) ---
 def run_stock_data_pipeline(
-    mode: str = 'initial_load',
+    logger: logging.Logger, # Pass logger
+    config: AppConfig,      # Pass config
+    mode: str = 'append',   # Changed default to 'append'
     batch_size: int = DEFAULT_BATCH_SIZE,
     append_start_date: Optional[str] = None,
     target_tickers: Optional[List[str]] = None,
-    db_file_path: Path = DEFAULT_DB_FILE
+    db_path_override: Optional[str] = None
 ):
-    """
-    Main function to run the stock data gathering pipeline. Handles multiple tickers per CIK.
-
-    Args:
-        mode: Operation mode ('initial_load', 'append', 'full_refresh', 'drop_tables').
-        batch_size: Number of *tickers* to process before committing a batch load.
-        append_start_date: Optional start date (YYYY-MM-DD) for 'append' mode.
-        target_tickers: Optional list of specific tickers to process.
-        db_file_path: Path to the DuckDB database file.
-    """
+    """Main function using ManagedDatabaseConnection and utilities."""
     start_run_time = time.time()
-    logging.info(f"--- Starting Stock Data Pipeline (v7) ---")
-    logging.info(f"Database: {db_file_path}")
-    logging.info(f"Run Mode: {mode}")
-    if target_tickers: logging.info(f"Target Tickers: {target_tickers}")
-    if mode == 'append' and append_start_date: logging.info(f"Append Start Date Override: {append_start_date}")
-    logging.info(f"Batch Size (Tickers): {batch_size}")
+    db_log_path = db_path_override if db_path_override else config.DB_FILE_STR # Use config default
+    logger.info(f"--- Starting Stock Data Pipeline ---")
+    logger.info(f"Database Target: {db_log_path}")
+    logger.info(f"Run Mode: {mode}")
+    if target_tickers: logger.info(f"Target Tickers: {target_tickers}")
+    if mode == 'append' and append_start_date: logger.info(f"Append Start Date Override: {append_start_date}")
+    logger.info(f"Batch Size (Tickers): {batch_size}")
 
     valid_modes = ['initial_load', 'append', 'full_refresh', 'drop_tables']
-    if mode not in valid_modes:
-        logging.error(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
-        return
+    if mode not in valid_modes: logger.error(f"Invalid mode '{mode}'. Exiting."); return
 
-    write_conn = connect_db(db_file_path, read_only=False)
-    if not write_conn:
-        logging.error(f"Failed to connect to database: {db_file_path}")
-        return
+    # Stats counters
+    processed_tickers_count = 0; skipped_tickers_count = 0
+    fetch_errors_count = 0; load_errors_count = 0; total_tickers_to_process = 0
 
-    # --- Mode Handling: Drop or Full Refresh Actions ---
     try:
-        if mode == 'drop_tables':
-            write_conn.begin()
-            drop_stock_tables(write_conn)
-            write_conn.commit()
-            logging.info("Drop tables operation finished.")
-            write_conn.close()
-            return
+        # Use context manager with override or config default path
+        with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False) as write_conn:
+            if not write_conn:
+                logger.critical("Exiting due to database connection failure.")
+                return # Cannot proceed without connection
 
-        write_conn.begin()
-        setup_tables(write_conn)
-        write_conn.commit()
+            # --- Mode Handling & Setup ---
+            try:
+                write_conn.begin() # Start transaction for setup/clear
+                if mode == 'drop_tables': drop_stock_tables(write_conn, logger); write_conn.commit(); logger.info("Drop finished."); return
+                setup_tables(write_conn, logger) # Pass logger
+                if mode == 'full_refresh': clear_stock_tables(write_conn, logger); logger.info("Full refresh clear done.") # Pass logger
+                write_conn.commit() # Commit setup/clear transaction
+            except Exception as setup_e:
+                logger.error(f"Failed setup/clear: {setup_e}. Exiting.", exc_info=True)
+                try: write_conn.rollback()
+                except: pass
+                return # Exit if setup fails
 
-        if mode == 'full_refresh':
-            write_conn.begin()
-            clear_stock_tables(write_conn)
-            write_conn.commit()
-            logging.info("Full refresh: Cleared existing stock and error data.")
+            # --- Initialize CIK Mapper (if needed) ---
+            mapper = None
+            target_tickers_upper = [t.upper() for t in target_tickers] if target_tickers else None
+            if not target_tickers_upper:
+                 try: mapper = StockMapper(); logger.info("StockMapper initialized.")
+                 except Exception as e: logger.error(f"Could not init StockMapper: {e}. Cannot map CIKs.", exc_info=True); return
 
-    except Exception as setup_e:
-         logging.error(f"Failed during table setup/clear: {setup_e}. Exiting.", exc_info=True)
-         try: write_conn.rollback()
-         except: pass
-         write_conn.close()
-         return
+            # --- Identify Tickers and CIK/Date Ranges ---
+            tickers_to_process_map: Dict[str, Dict] = {}
+            try:
+                if target_tickers_upper:
+                    logger.info(f"Getting date ranges for {len(target_tickers_upper)} target tickers...")
+                    for ticker in tqdm(target_tickers_upper, desc="Getting Ticker Dates"):
+                        # Pass logger
+                        range_info = get_ticker_date_range(write_conn, ticker, logger)
+                        if range_info:
+                            cik, min_d, max_d = range_info
+                            tickers_to_process_map[ticker] = {'cik': cik, 'min_date': min_d, 'max_date': max_d}
+                        else:
+                            # Log error inside try-except block
+                            try:
+                                write_conn.begin()
+                                log_fetch_error(write_conn, logger, None, ticker, 'Missing Info', 'Could not find CIK/date range')
+                                write_conn.commit()
+                            except Exception as log_e:
+                                logger.error(f"Failed to log Missing Info error for {ticker}: {log_e}")
+                                try: write_conn.rollback()
+                                except: pass
+                elif mapper: # Process all CIKs
+                    # Pass logger
+                    companies_data_df = get_companies_and_xbrl_dates(write_conn, logger)
+                    if not companies_data_df.empty:
+                        logger.info(f"Mapping CIKs to tickers for {len(companies_data_df)} companies...")
+                        for _, row in tqdm(companies_data_df.iterrows(), total=len(companies_data_df), desc="Mapping CIKs"):
+                            cik, min_d, max_d = row['cik'], row['min_date'], row['max_date']
+                            if pd.isna(min_d) or pd.isna(max_d): continue
+                            try:
+                                tickers_set: Set[str] = mapper.cik_to_tickers.get(cik, set())
+                                if not tickers_set:
+                                     try:
+                                         write_conn.begin(); log_fetch_error(write_conn, logger, cik, None, 'No Ticker Found', 'Mapper no tickers.'); write_conn.commit()
+                                     except Exception as log_e: logger.error(f"Failed log No Ticker err {cik}: {log_e}"); write_conn.rollback()
+                                     continue
+                                for ticker in tickers_set:
+                                     if ticker not in tickers_to_process_map: tickers_to_process_map[ticker] = {'cik': cik, 'min_date': min_d, 'max_date': max_d}
+                                     else: logger.debug(f"Ticker {ticker} already mapped from CIK {tickers_to_process_map[ticker]['cik']}. Ignore CIK {cik}.")
+                            except Exception as map_e:
+                                 try:
+                                     write_conn.begin(); log_fetch_error(write_conn, logger, cik, None, 'Mapper Error', f"Lookup failed: {map_e}"); write_conn.commit()
+                                 except Exception as log_e: logger.error(f"Failed log Mapper err {cik}: {log_e}"); write_conn.rollback()
+                    else: logger.warning("Company/XBRL date query returned no results.")
+            except Exception as e: logger.error(f"Error during ticker identification: {e}", exc_info=True); return
 
-    # --- Initialize CIK Mapper (only if needed) ---
-    mapper = None
-    target_tickers_upper = [t.upper() for t in target_tickers] if target_tickers else None
-    if not target_tickers_upper:
-         try:
-             logging.info("Initializing StockMapper...")
-             mapper = StockMapper()
-             logging.info("StockMapper initialized successfully.")
-         except Exception as e:
-             logging.error(f"Could not initialize StockMapper: {e}. Cannot map CIKs.", exc_info=True)
-             write_conn.close()
-             return
+            if not tickers_to_process_map: logger.warning("No tickers identified for processing."); return
 
-    # --- Identify Tickers and CIK/Date Ranges ---
-    # Structure: {ticker: {'cik': cik, 'min_date': min_d, 'max_date': max_d}}
-    tickers_to_process_map: Dict[str, Dict] = {}
-    try:
-        if target_tickers_upper:
-            logging.info(f"Getting date ranges for {len(target_tickers_upper)} target tickers...")
-            for ticker in tqdm(target_tickers_upper, desc="Getting Ticker Dates"):
-                range_info = get_ticker_date_range(write_conn, ticker)
-                if range_info:
-                    cik, min_d, max_d = range_info
-                    tickers_to_process_map[ticker] = {'cik': cik, 'min_date': min_d, 'max_date': max_d}
-                else:
-                    log_fetch_error(write_conn, None, ticker, 'Missing Info', 'Could not find CIK/date range for target ticker.')
-        elif mapper: # Process all CIKs from DB
-            companies_data_df = get_companies_and_xbrl_dates(write_conn)
-            if not companies_data_df.empty:
-                logging.info(f"Mapping CIKs to tickers for {len(companies_data_df)} companies...")
-                for _, row in tqdm(companies_data_df.iterrows(), total=len(companies_data_df), desc="Mapping CIKs"):
-                    cik = row['cik']
-                    min_date = row['min_date']
-                    max_date = row['max_date']
-                    if pd.isna(min_date) or pd.isna(max_date): continue # Skip if dates are invalid
+            # --- Get Latest Dates for Append Mode ---
+            latest_dates = {}
+            if mode == 'append':
+                # Pass logger
+                latest_dates = get_latest_stock_dates(write_conn, logger, target_tickers=list(tickers_to_process_map.keys()))
 
+            # --- Iterate, Fetch, Batch Load ---
+            total_tickers_to_process = len(tickers_to_process_map)
+            batch_data_dfs: List[pd.DataFrame] = []
+            processed_tickers_in_batch = 0
+            logger.info(f"Starting fetch/load loop for {total_tickers_to_process} unique tickers...")
+            ticker_items = list(tickers_to_process_map.items())
+
+            for i, (ticker, info) in enumerate(tqdm(ticker_items, desc="Fetching Stock Data", unit="ticker")):
+                cik, min_date_overall, max_date_overall = info['cik'], info['min_date'], info['max_date']
+                fetch_start_date = None; fetch_end_date = datetime.now(timezone.utc).date() # Default end date is today
+                logger.debug(f"Processing {i+1}/{total_tickers_to_process}: {ticker} (CIK {cik})")
+
+                # Determine fetch range
+                if mode == 'append':
+                    last_date = latest_dates.get(ticker); start_date_override = None
+                    if append_start_date:
+                        try: start_date_override = datetime.strptime(append_start_date, '%Y-%m-%d').date()
+                        except ValueError: logger.error(f"Invalid append_start_date: {append_start_date}. Ignored.")
+                    if start_date_override: fetch_start_date = start_date_override
+                    elif last_date: fetch_start_date = last_date + timedelta(days=1)
+                    else: fetch_start_date = min_date_overall # Fallback for new ticker in append mode
+                    # Keep fetch_end_date as today for append mode
+                else: # initial_load or full_refresh
+                    fetch_start_date = min_date_overall
+                    fetch_end_date = max_date_overall # Use max date from XBRL facts
+
+                # Validate dates before fetching
+                if not fetch_start_date or not fetch_end_date:
+                     try: write_conn.begin(); log_fetch_error(write_conn, logger, cik, ticker, 'Date Error', 'Invalid fetch dates generated.'); write_conn.commit()
+                     except Exception as log_e: logger.error(f"Failed log Date err {ticker}: {log_e}"); write_conn.rollback()
+                     skipped_tickers_count += 1; continue
+                if fetch_start_date > fetch_end_date:
+                    try: write_conn.begin(); log_fetch_error(write_conn, logger, cik, ticker, 'Date Error', f'Start>End: {fetch_start_date} > {fetch_end_date}.', fetch_start_date.strftime('%Y-%m-%d'), fetch_end_date.strftime('%Y-%m-%d')); write_conn.commit()
+                    except Exception as log_e: logger.error(f"Failed log Start>End err {ticker}: {log_e}"); write_conn.rollback()
+                    skipped_tickers_count += 1; continue
+
+                fetch_start_date_str = fetch_start_date.strftime('%Y-%m-%d')
+                fetch_end_date_str = fetch_end_date.strftime('%Y-%m-%d')
+
+                # Fetch Data (pass logger)
+                stock_history_df, fetch_error_msg = fetch_stock_history(ticker, fetch_start_date_str, fetch_end_date_str, logger)
+
+                if stock_history_df is None:
+                    fetch_errors_count += 1; skipped_tickers_count += 1
+                    try: write_conn.begin(); log_fetch_error(write_conn, logger, cik, ticker, 'Fetch Error', fetch_error_msg or "Unknown fetch error", fetch_start_date_str, fetch_end_date_str); write_conn.commit()
+                    except Exception as log_e: logger.error(f"Failed log Fetch err {ticker}: {log_e}"); write_conn.rollback()
+                elif not stock_history_df.empty:
+                    batch_data_dfs.append(stock_history_df); processed_tickers_in_batch += 1
+                else: # Empty DataFrame returned, but no error message -> means no *new* data in range
+                    logger.info(f"No new data found for {ticker} from {fetch_start_date_str} to {fetch_end_date_str}.")
+                    # Don't count as skipped, just nothing to add
+
+                # Load Batch Periodically
+                is_last_item = (i + 1 == total_tickers_to_process)
+                if batch_data_dfs and (processed_tickers_in_batch >= batch_size or is_last_item):
+                    logger.info(f"Loading batch ({processed_tickers_in_batch} tickers)...")
+                    # Use REPLACE for append/initial, INSERT for full_refresh
+                    insert_mode = "REPLACE" if mode != 'full_refresh' else "INSERT"
+                    load_successful = False
                     try:
-                        tickers_set: Set[str] = mapper.cik_to_tickers.get(cik, set())
-                        if not tickers_set:
-                             log_fetch_error(write_conn, cik, None, 'No Ticker Found', 'sec-cik-mapper returned no tickers.')
-                             continue
+                        write_conn.begin() # Transaction for batch load
+                        # Pass logger to batch load function
+                        load_successful = load_stock_data_batch(write_conn, logger, batch_data_dfs, insert_mode=insert_mode)
+                        if load_successful:
+                            write_conn.commit()
+                            processed_tickers_count += processed_tickers_in_batch # Increment successful count
+                            logger.info(f"Batch commit successful for {processed_tickers_in_batch} tickers.")
+                        else:
+                            # Errors logged within load_stock_data_batch
+                            write_conn.rollback()
+                            load_errors_count += processed_tickers_in_batch # Count tickers in failed batch
+                            skipped_tickers_count += processed_tickers_in_batch # Also count as skipped overall
+                            logger.warning(f"Batch rolled back for {processed_tickers_in_batch} tickers.")
+                    except Exception as batch_load_e:
+                        logger.error(f"Unexpected batch load transaction error: {batch_load_e}", exc_info=True)
+                        load_errors_count += processed_tickers_in_batch # Count tickers
+                        skipped_tickers_count += processed_tickers_in_batch # Count as skipped
+                        try: write_conn.rollback()
+                        except Exception as rb_e: logger.error(f"Rollback attempt failed after batch load error: {rb_e}")
+                        # Log a generic batch error if possible
+                        first_ticker = batch_data_dfs[0]['ticker'].iloc[0] if batch_data_dfs and not batch_data_dfs[0].empty else "UNKNOWN"
+                        try: log_fetch_error(write_conn, logger, None, f"Batch ~{first_ticker}", 'Load Error', f"Unexpected TX err: {batch_load_e}")
+                        except: pass # Avoid error loops if logging fails
+                    finally:
+                        batch_data_dfs = [] # Reset batch regardless of outcome
+                        processed_tickers_in_batch = 0
 
-                        for ticker in tickers_set:
-                             if ticker not in tickers_to_process_map: # Add if not already processed via another CIK mapping
-                                 tickers_to_process_map[ticker] = {'cik': cik, 'min_date': min_date, 'max_date': max_date}
-                             else:
-                                 # Handle cases where a ticker might map from multiple CIKs (rare, but possible)
-                                 # Maybe update date range to be the widest? For now, just log.
-                                 logging.debug(f"Ticker {ticker} already mapped from CIK {tickers_to_process_map[ticker]['cik']}. Ignoring duplicate mapping from CIK {cik}.")
-                    except Exception as map_e:
-                        log_fetch_error(write_conn, cik, None, 'Mapper Error', f"CIK lookup failed: {map_e}")
-            else:
-                 logging.warning("Company/XBRL date query returned no results.")
+                if YFINANCE_DELAY > 0 and not is_last_item: time.sleep(YFINANCE_DELAY)
 
-    except Exception as e:
-        logging.error(f"Error during company/ticker identification: {e}", exc_info=True)
-        write_conn.close()
-        return
+            # --- End of Loop ---
+            logger.info("Finished processing all identified tickers.")
 
-    if not tickers_to_process_map:
-        logging.warning("No tickers identified for processing based on criteria.")
-        write_conn.close()
-        return
+        # Context manager handles final commit/rollback/close for the main connection
 
-    # --- Get Latest Dates for Append Mode ---
-    latest_dates = {}
-    if mode == 'append':
-        target_tickers_for_latest_date = list(tickers_to_process_map.keys())
-        latest_dates = get_latest_stock_dates(write_conn, target_tickers=target_tickers_for_latest_date)
-
-    # --- Iterate through identified TICKERS, Fetch, Batch Load ---
-    total_tickers_to_process = len(tickers_to_process_map)
-    processed_tickers_count = 0 # Tickers with successful load
-    skipped_tickers_count = 0   # Tickers skipped before fetch or failed fetch/load
-    fetch_errors_count = 0
-    load_errors_count = 0
-    batch_data_dfs: List[pd.DataFrame] = []
-    processed_tickers_in_batch = 0
-
-    logging.info(f"Starting fetch and load loop for {total_tickers_to_process} unique tickers...")
-    ticker_items = list(tickers_to_process_map.items())
-
-    for i, (ticker, info) in enumerate(tqdm(ticker_items, desc="Fetching Stock Data", unit="ticker")):
-        cik = info['cik']
-        min_date_overall = info['min_date']
-        max_date_overall = info['max_date']
-        fetch_start_date = None
-        fetch_end_date = datetime.now(timezone.utc).date() # Default end to today
-
-        logging.debug(f"Processing {i + 1}/{total_tickers_to_process}: Ticker {ticker} (from CIK {cik})")
-
-        # Determine fetch date range
-        if mode == 'append':
-            last_date = latest_dates.get(ticker)
-            start_date_override = None
-            if append_start_date:
-                try: start_date_override = datetime.strptime(append_start_date, '%Y-%m-%d').date()
-                except ValueError: logging.error(f"Invalid append_start_date format: {append_start_date}. Ignored.")
-
-            if start_date_override: fetch_start_date = start_date_override
-            elif last_date: fetch_start_date = last_date + timedelta(days=1)
-            else: fetch_start_date = min_date_overall
-            # fetch_end_date already set to today
-
-        else: # initial_load or full_refresh
-            fetch_start_date = min_date_overall
-            fetch_end_date = max_date_overall # Use XBRL range
-
-        if not fetch_start_date or not fetch_end_date:
-            log_fetch_error(write_conn, cik, ticker, 'Date Error', 'Could not determine valid start/end fetch dates.')
-            skipped_tickers_count += 1; continue
-        if fetch_start_date > fetch_end_date:
-             log_fetch_error(write_conn, cik, ticker, 'Date Error', f'Start date {fetch_start_date} > end date {fetch_end_date}.', fetch_start_date.strftime('%Y-%m-%d'), fetch_end_date.strftime('%Y-%m-%d'))
-             skipped_tickers_count += 1; continue
-
-        fetch_start_date_str = fetch_start_date.strftime('%Y-%m-%d')
-        fetch_end_date_str = fetch_end_date.strftime('%Y-%m-%d')
-
-        # Fetch Data
-        stock_history_df, fetch_error_msg = fetch_stock_history(ticker, fetch_start_date_str, fetch_end_date_str)
-
-        if stock_history_df is None:
-            fetch_errors_count += 1
-            log_fetch_error(write_conn, cik, ticker, 'Fetch Error', fetch_error_msg or "Unknown yfinance error", fetch_start_date_str, fetch_end_date_str)
-            skipped_tickers_count += 1
-        elif not stock_history_df.empty:
-            batch_data_dfs.append(stock_history_df)
-            processed_tickers_in_batch += 1 # Count tickers added to batch
-            # Don't increment processed_tickers_count until batch load succeeds
-        else:
-            logging.info(f"No stock data returned/processed for {ticker} in range {fetch_start_date_str} to {fetch_end_date_str}.")
-            skipped_tickers_count += 1 # Count as skipped if no data loaded
-
-
-        # Load Batch Periodically
-        is_last_item = (i + 1 == total_tickers_to_process)
-        if batch_data_dfs and (processed_tickers_in_batch >= batch_size or is_last_item):
-             logging.info(f"Reached batch size ({processed_tickers_in_batch} tickers) or end of list. Loading batch to DB...")
-             insert_mode = "REPLACE" if mode != 'full_refresh' else "INSERT"
-             load_successful = False
-             try:
-                  write_conn.begin()
-                  load_successful = load_stock_data_batch(write_conn, batch_data_dfs, insert_mode=insert_mode)
-                  if load_successful:
-                       write_conn.commit()
-                       processed_tickers_count += processed_tickers_in_batch # Increment total success count
-                  else:
-                       write_conn.rollback()
-                       load_errors_count += processed_tickers_in_batch
-                       # Error logged by load_stock_data_batch
-             except Exception as batch_load_e:
-                  logging.error(f"Unexpected error during batch load transaction: {batch_load_e}", exc_info=True)
-                  try: write_conn.rollback()
-                  except: pass
-                  load_errors_count += processed_tickers_in_batch
-                  log_fetch_error(write_conn, None, f"Batch starting ~{batch_data_dfs[0]['ticker'].iloc[0]}", 'Load Error', f"Unexpected batch load error: {batch_load_e}")
-             finally:
-                  if not load_successful:
-                       # If load failed, these tickers were skipped in terms of successful processing
-                       skipped_tickers_count += processed_tickers_in_batch
-                  batch_data_dfs = [] # Clear batch
-                  processed_tickers_in_batch = 0
-
-        # Optional Delay
-        if YFINANCE_DELAY > 0 and not is_last_item:
-             time.sleep(YFINANCE_DELAY)
-
-    # --- Final Cleanup & Summary ---
-    if write_conn:
-        try: write_conn.commit() # Commit any final pending error logs
-        except Exception: pass
-        try: write_conn.close()
-        except Exception: pass
-        logging.info("Write database connection closed.")
+    except Exception as pipeline_e:
+         logger.error(f"Pipeline error outside main loop: {pipeline_e}", exc_info=True)
 
     end_run_time = time.time()
-    logging.info(f"--- Stock Data Pipeline Finished ---")
-    logging.info(f"Total Time: {end_run_time - start_run_time:.2f} seconds")
-    logging.info(f"Total Unique Tickers Identified: {total_tickers_to_process}")
-    logging.info(f"Tickers Successfully Loaded/Updated: {processed_tickers_count}")
-    logging.info(f"Tickers Skipped or Errored (No Data Loaded): {skipped_tickers_count + fetch_errors_count}") # Combined count
-    logging.info(f"Fetch Errors (logged): {fetch_errors_count}")
-    logging.info(f"Load Errors (logged): {load_errors_count}")
-    logging.info(f"Check '{ERROR_TABLE_NAME}' table for details on errors.")
+    logger.info(f"--- Stock Data Pipeline Finished ---")
+    logger.info(f"Total Time: {end_run_time - start_run_time:.2f} sec")
+    logger.info(f"Tickers Targeted: {total_tickers_to_process}")
+    logger.info(f"Tickers Loaded OK: {processed_tickers_count}")
+    logger.info(f"Tickers Skipped/Errored: {skipped_tickers_count}")
+    logger.info(f"Fetch Errors Logged: {fetch_errors_count}")
+    logger.info(f"Load Errors (Batches Failed): {load_errors_count}") # Corrected description
+    logger.info(f"Check '{ERROR_TABLE_NAME}' in DB for details.")
 
 
 # --- Script Execution Control ---
 if __name__ == "__main__":
-    # --- SET YOUR DESIRED PARAMETERS HERE FOR DIRECT EXECUTION / DEBUGGING ---
+    try:
+        config = AppConfig(calling_script_path=Path(__file__))
+    except SystemExit as e:
+        logger.critical(f"Configuration failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"Unexpected error loading config: {e}", exc_info=True)
+        sys.exit(1)
 
-    # Example 1: Initial load for all companies, default batch size
-    # run_stock_data_pipeline(mode='initial_load', batch_size=DEFAULT_BATCH_SIZE)
-
-    # Example 2: Append data for specific tickers since a certain date
-    # run_stock_data_pipeline(
-    #     mode='append',
-    #     target_tickers=['AAPL', 'MSFT', 'JACS'], # JACS will likely fetch multiple
-    #     append_start_date='2024-04-15', # Optional override
-    #     batch_size=10
-    # )
-
-    # Example 3: Full refresh for all companies (use with caution!)
-    # run_stock_data_pipeline(mode='full_refresh')
-
-    # Example 4: Drop the tables
-    # run_stock_data_pipeline(mode='drop_tables')
-
-    # Default action when run directly: Append from last known date for all tickers
+    # Example: Append using DB_FILE from config
     run_stock_data_pipeline(
-        mode='append',
-        batch_size=DEFAULT_BATCH_SIZE,
-        db_file_path=DEFAULT_DB_FILE
+        logger=logger, # Pass the initialized logger
+        config=config, # Pass the initialized config
+        mode='append', # Default mode
+        batch_size=config.get_optional_int("STOCK_GATHERER_BATCH_SIZE", DEFAULT_BATCH_SIZE), # Example optional config
+        # append_start_date=config.get_optional_var("STOCK_GATHERER_APPEND_START"), # Example optional config
+        # target_tickers=None, # Or load from config/args
+        db_path_override=None # Use DB from config by default
     )
 
-    logging.info("Script execution finished.")
+    # Example: Initial load to memory db for specific tickers
+    # run_stock_data_pipeline(
+    #     logger=logger,
+    #     config=config, # Still pass config even if DB is overridden
+    #     mode='initial_load',
+    #     target_tickers=['AAPL', 'MSFT'],
+    #     db_path_override=':memory:'
+    # )
+
+    logger.info("Script execution finished.")
