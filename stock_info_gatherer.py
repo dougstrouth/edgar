@@ -15,18 +15,25 @@ Uses:
 import logging
 import sys
 import time
+import os
+import shutil
+import multiprocessing
 from pathlib import Path
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, Future
+from typing import Dict, Any, List
 
 import pandas as pd
 import yfinance as yf
+import requests
 from tqdm import tqdm
 
 # --- Import Utilities ---
 from config_utils import AppConfig
+import duckdb
 from logging_utils import setup_logging
 from database_conn import ManagedDatabaseConnection
+import parquet_converter
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem
@@ -34,11 +41,18 @@ LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
 logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # --- Constants ---
-DEFAULT_REQUEST_DELAY = 0.05 # Default 50ms delay
-DEFAULT_MAX_WORKERS = 10 # Default number of concurrent workers
+DEFAULT_MAX_WORKERS = 10 # Default number of concurrent fetcher processes
+
+# Define constants for table names, now used for directory names
+YF_INFO_FETCH_ERRORS = "yf_info_fetch_errors"
+YF_INCOME_STATEMENT = "yf_income_statement"
+YF_BALANCE_SHEET = "yf_balance_sheet"
+YF_CASH_FLOW = "yf_cash_flow"
+
+ALL_YF_TABLES = [YF_INFO_FETCH_ERRORS, YF_INCOME_STATEMENT, YF_BALANCE_SHEET, YF_CASH_FLOW]
 
 # --- Database Schema ---
-YF_TABLES_SCHEMA = {
+YF_TABLES_SCHEMA = { # This is now only used by the loader script
     "yf_profile_metrics": """
         CREATE TABLE IF NOT EXISTS yf_profile_metrics (
             ticker VARCHAR NOT NULL COLLATE NOCASE,
@@ -117,41 +131,24 @@ YF_TABLES_SCHEMA = {
         );""",
 }
 
-def setup_yf_tables(con):
-    """Creates all yfinance info tables."""
-    logger.info("Setting up yfinance info tables...")
-    for table_name, sql in YF_TABLES_SCHEMA.items():
-        try:
-            con.execute(sql)
-            logger.debug(f"Table '{table_name}' created or exists.")
-        except Exception as e:
-            logger.error(f"Failed to create table '{table_name}': {e}", exc_info=True)
-            raise
-    logger.info("All yfinance info tables are set up.")
-
-def get_tickers_to_process(con):
-    """Gets a list of all unique tickers from the 'tickers' table."""
-    logger.info("Querying for unique tickers to process...")
-    try:
-        tickers_df = con.sql("SELECT DISTINCT ticker FROM tickers ORDER BY ticker").df()
-        tickers = tickers_df['ticker'].tolist()
-        logger.info(f"Found {len(tickers)} unique tickers to process.")
-        return tickers
+def get_untrackable_tickers(con: duckdb.DuckDBPyConnection, expiry_days: int = 365) -> set[str]:
+    """
+    Gets a set of tickers that have been marked as untrackable within the expiry period.
+    Tickers marked untrackable longer ago than `expiry_days` will be retried.
+    """
+    logger.info(f"Querying for untrackable tickers (expiry: {expiry_days} days) to exclude...")
+    untrackable_set: set[str] = set()
+    try: # Check if table exists first
+        tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+        if "yf_untrackable_tickers" in tables:
+            query = f"SELECT ticker FROM yf_untrackable_tickers WHERE last_failed_timestamp >= (now() - INTERVAL '{expiry_days} days');"
+            results = con.execute(query).fetchall()
+            untrackable_set = {row[0] for row in results}
+            logger.info(f"Found {len(untrackable_set)} recently untrackable tickers to exclude from this run.")
     except Exception as e:
-        logger.error(f"Failed to query tickers: {e}", exc_info=True)
-        return []
+        logger.error(f"Could not query untrackable tickers: {e}", exc_info=True)
+    return untrackable_set
 
-def log_fetch_error(con, ticker: str, message: str):
-    """Logs a fetch error to the database."""
-    timestamp = datetime.now(timezone.utc)
-    logger.warning(f"Logging error for ticker {ticker}: {message}")
-    try:
-        con.execute(
-            "INSERT INTO yf_info_fetch_errors VALUES (?, ?, ?)",
-            [ticker, timestamp, message]
-        )
-    except Exception as db_e:
-        logger.error(f"Could not log error for ticker {ticker} to DB: {db_e}")
 
 def _process_financial_statement(statement_df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """Helper function to transpose and melt a yfinance financial statement DataFrame."""
@@ -170,260 +167,234 @@ def _process_financial_statement(statement_df: pd.DataFrame, ticker: str) -> pd.
         logger.warning(f"Could not process financial statement for {ticker}: {e}")
         return pd.DataFrame()
 
-def fetch_ticker_data(ticker_str: str, delay: float) -> dict:
+def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Fetches all info for a single ticker from yfinance.
-    This function is designed to be run in a separate thread and does not touch the database.
+    Worker function to be run in a process. Fetches all info for a single ticker.
     """
-    fetch_timestamp = datetime.now(timezone.utc)
-    if delay > 0:
-        time.sleep(delay)
+    ticker_str = job['ticker']
+    
+    # Create a temporary, process-specific cache directory to prevent file locks
+    temp_cache_dir = Path(f"./.yfinance_cache_{os.getpid()}")
+    temp_cache_dir.mkdir(exist_ok=True)
+    os.environ['YFINANCE_CACHE_DIR'] = str(temp_cache_dir.resolve())
 
     try:
-        ticker = yf.Ticker(ticker_str)
-        
-        # --- 1. Profile Metrics (ticker.info) ---
-        info = ticker.info
-        if info and info.get('trailingPE'): # Use a key that indicates valid data
-            profile_data = {
-                'ticker': ticker_str, 'fetch_timestamp': fetch_timestamp,
-                'cik': info.get('cik'), 'sector': info.get('sector'), 'industry': info.get('industry'),
-                'country': info.get('country'), 'market_cap': info.get('marketCap'), 'beta': info.get('beta'),
-                'trailing_pe': info.get('trailingPE'), 'forward_pe': info.get('forwardPE'),
-                'enterprise_value': info.get('enterpriseValue'), 'book_value': info.get('bookValue'),
-                'price_to_book': info.get('priceToBook'), 'trailing_eps': info.get('trailingEps'),
-                'forward_eps': info.get('forwardEps'), 'peg_ratio': info.get('pegRatio')
-            }
-            df_profile = pd.DataFrame([profile_data])
-        else:
-            df_profile = pd.DataFrame()
+        # Make retry parameters configurable via environment variables, with sane defaults
+        max_retries = int(os.environ.get("YFINANCE_MAX_RETRIES", "5")) # type: ignore
+        base_delay = float(os.environ.get("YFINANCE_BASE_DELAY", "15.0")) # type: ignore # Increased base delay for persistent rate-limiting
 
-        # --- 2. Recommendations ---
-        recs = ticker.recommendations
-        if recs is not None and not recs.empty:
-            recs.reset_index(inplace=True)
-            recs['ticker'] = ticker_str
-            recs.rename(columns={
-                'Date': 'recommendation_timestamp', 'Firm': 'firm',
-                'From Grade': 'grade_from', 'To Grade': 'grade_to', 'Action': 'action'
-            }, inplace=True)
-            df_recs = recs[['ticker', 'recommendation_timestamp', 'firm', 'grade_from', 'grade_to', 'action']]
-        else:
-            df_recs = pd.DataFrame()
+        for attempt in range(max_retries):
+            error_msg = None
+            try:
+                session = requests.Session()
+                ticker = yf.Ticker(ticker_str, session=session)
 
-        # --- 3. Major Holders ---
-        holders = ticker.major_holders
-        if holders is not None and not holders.empty:
-            # Helper to safely parse percentage strings like '72.55%'
-            def parse_pct(val):
-                if isinstance(val, str) and '%' in val:
-                    try:
-                        return float(val.strip('%')) / 100.0
-                    except (ValueError, TypeError):
-                        return None
-                return None
-            pct_insiders = parse_pct(holders.iloc[0, 0]) if len(holders) > 0 else None
-            pct_institutions = parse_pct(holders.iloc[1, 0]) if len(holders) > 1 else None
-            holders_data = {
-                'ticker': ticker_str, 'fetch_timestamp': fetch_timestamp,
-                'pct_insiders': pct_insiders, 'pct_institutions': pct_institutions
-            }
-            df_holders = pd.DataFrame([holders_data])
-        else:
-            df_holders = pd.DataFrame()
-        
-        # --- 4. Stock Actions (Dividends & Splits) ---
-        actions = ticker.actions
-        if actions is not None and not actions.empty:
-            actions.reset_index(inplace=True)
-            actions['ticker'] = ticker_str
-            # Melt to create action_type and value columns
-            actions_melted = actions.melt(id_vars=['Date', 'ticker'], value_vars=['Dividends', 'Stock Splits'],
-                                          var_name='action_type', value_name='value')
-            actions_final = actions_melted[actions_melted['value'] != 0].copy()
-            actions_final.rename(columns={'Date': 'action_date'}, inplace=True)
-            if not actions_final.empty:
-                df_actions = actions_final[['ticker', 'action_date', 'action_type', 'value']]
-            else:
-                df_actions = pd.DataFrame()
-        else:
-            df_actions = pd.DataFrame()
+                # --- Fetch Financial Statements ---
+                df_income = _process_financial_statement(ticker.income_stmt, ticker_str)
+                df_balance = _process_financial_statement(ticker.balance_sheet, ticker_str)
+                df_cashflow = _process_financial_statement(ticker.cashflow, ticker_str)
 
-        # --- 5. Financial Statements ---
-        df_income = _process_financial_statement(ticker.income_stmt, ticker_str)
-        df_balance = _process_financial_statement(ticker.balance_sheet, ticker_str)
-        df_cashflow = _process_financial_statement(ticker.cashflow, ticker_str)
+                # If we get here, it's a success
+                return {
+                    'status': 'success', 'ticker': ticker_str,
+                    YF_INCOME_STATEMENT: df_income, YF_BALANCE_SHEET: df_balance, YF_CASH_FLOW: df_cashflow
+                }
+            except Exception as e:
+                e_str = str(e).lower()
+                if "404" in e_str or "no data found" in e_str:
+                    error_msg = f"Ticker {ticker_str} not found on yfinance (404)."
+                    logger.debug(error_msg)
+                elif "429" in e_str or "too many requests" in e_str:
+                    error_msg = f"Rate limit hit for {ticker_str} (429)."
+                    logger.warning(error_msg)
+                else:
+                    error_msg = f"yfinance info fetch failed for {ticker_str}: {type(e).__name__} - {e}"
+                    logger.warning(error_msg)
 
-        return {
-            'status': 'success', 'ticker': ticker_str,
-            'profile': df_profile, 'recs': df_recs,
-            'holders': df_holders, 'actions': df_actions,
-            'income': df_income, 'balance': df_balance, 'cashflow': df_cashflow
-        }
+            # --- Retry Logic ---
+            is_retryable = error_msg and ("429" in error_msg or "too many requests" in error_msg.lower())
+            if is_retryable:
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt) + (os.urandom(1)[0] / 255.0)
+                    logger.warning(f"Retryable error for {ticker_str} ('{error_msg[:50]}...'). Retrying in {wait_time:.2f}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    error_msg = f"Failed after {max_retries} retries: {error_msg}"
+                    logger.error(error_msg)
+            
+            # If we are here, it's a non-retryable error or the final failed retry
+            if error_msg and "not found on yfinance" in error_msg:
+                try:
+                    db_path = job.get('db_path')
+                    if db_path:
+                        with ManagedDatabaseConnection(db_path_override=db_path, read_only=False) as conn:
+                            if conn:
+                                conn.execute("""
+                                    CREATE TABLE IF NOT EXISTS yf_untrackable_tickers (
+                                        ticker VARCHAR NOT NULL COLLATE NOCASE PRIMARY KEY,
+                                        reason VARCHAR,
+                                        last_failed_timestamp TIMESTAMPTZ
+                                    );
+                                """)
+                                conn.execute("INSERT OR REPLACE INTO yf_untrackable_tickers VALUES (?, ?, ?);", [ticker_str, "No data from yfinance", datetime.now(timezone.utc)])
+                                logger.info(f"Marked {ticker_str} as untrackable in the database.")
+                except Exception as db_e:
+                    logger.error(f"Failed to write untrackable status for {ticker_str} to DB: {db_e}", exc_info=True)
 
-    except Exception as e:
-        e_str = str(e).lower()
-        if "404" in e_str or "no data found" in e_str:
-            error_msg = f"Ticker {ticker_str} not found on yfinance (404)."
-            logger.debug(error_msg)
-        elif "429" in e_str or "too many requests" in e_str:
-            error_msg = f"Rate limit hit for {ticker_str} (429). Consider increasing YFINANCE_REQUEST_DELAY."
-            logger.warning(error_msg)
-        else:
-            error_msg = f"yfinance info fetch failed for {ticker_str}: {type(e).__name__} - {e}"
-            logger.warning(error_msg)
-        return {'status': 'error', 'ticker': ticker_str, 'message': error_msg}
-
-def bulk_load_data(con, all_results: list):
-    """Concatenates and bulk-loads all fetched data into the database."""
-    if not all_results:
-        logger.info("No data to load.")
-        return
-
-    logger.info(f"Preparing to bulk-load data for {len(all_results)} successfully fetched tickers.")
-
-    # Aggregate data from all results
-    all_profiles = pd.concat([r['profile'] for r in all_results if not r['profile'].empty], ignore_index=True)
-    all_recs = pd.concat([r['recs'] for r in all_results if not r['recs'].empty], ignore_index=True)
-    all_holders = pd.concat([r['holders'] for r in all_results if not r['holders'].empty], ignore_index=True)
-    all_actions = pd.concat([r['actions'] for r in all_results if not r['actions'].empty], ignore_index=True)
-    all_income = pd.concat([r['income'] for r in all_results if not r['income'].empty], ignore_index=True)
-    all_balance = pd.concat([r['balance'] for r in all_results if not r['balance'].empty], ignore_index=True)
-    all_cashflow = pd.concat([r['cashflow'] for r in all_results if not r['cashflow'].empty], ignore_index=True)
-
-    try:
-        con.begin()
-        logger.info("--- Starting Bulk Load Transaction ---")
-
-        # Load Profiles
-        if not all_profiles.empty:
-            logger.info(f"Loading {len(all_profiles)} profile metrics records...")
-            con.execute("""
-                INSERT INTO yf_profile_metrics SELECT * FROM all_profiles
-                ON CONFLICT (ticker) DO UPDATE SET
-                fetch_timestamp = excluded.fetch_timestamp, cik = excluded.cik, sector = excluded.sector,
-                industry = excluded.industry, country = excluded.country, market_cap = excluded.market_cap,
-                beta = excluded.beta, trailing_pe = excluded.trailing_pe, forward_pe = excluded.forward_pe,
-                enterprise_value = excluded.enterprise_value, book_value = excluded.book_value,
-                price_to_book = excluded.price_to_book, trailing_eps = excluded.trailing_eps,
-                forward_eps = excluded.forward_eps, peg_ratio = excluded.peg_ratio;
-            """)
-
-        # Load Recommendations
-        if not all_recs.empty:
-            logger.info(f"Loading {len(all_recs)} recommendation records...")
-            con.execute("INSERT INTO yf_recommendations SELECT * FROM all_recs ON CONFLICT DO NOTHING")
-
-        # Load Major Holders
-        if not all_holders.empty:
-            logger.info(f"Loading {len(all_holders)} major holder records...")
-            con.execute("""
-                INSERT INTO yf_major_holders SELECT * FROM all_holders
-                ON CONFLICT (ticker) DO UPDATE SET
-                fetch_timestamp = excluded.fetch_timestamp, pct_insiders = excluded.pct_insiders,
-                pct_institutions = excluded.pct_institutions;
-            """)
-
-        # Load Stock Actions
-        if not all_actions.empty:
-            logger.info(f"Loading {len(all_actions)} stock action records...")
-            con.execute("INSERT INTO yf_stock_actions SELECT * FROM all_actions ON CONFLICT DO NOTHING")
-
-        # Load Financials
-        if not all_income.empty:
-            logger.info(f"Loading {len(all_income)} income statement records...")
-            con.execute("INSERT OR REPLACE INTO yf_income_statement SELECT * FROM all_income")
-
-        if not all_balance.empty:
-            logger.info(f"Loading {len(all_balance)} balance sheet records...")
-            con.execute("INSERT OR REPLACE INTO yf_balance_sheet SELECT * FROM all_balance")
-
-        if not all_cashflow.empty:
-            logger.info(f"Loading {len(all_cashflow)} cash flow statement records...")
-            con.execute("INSERT OR REPLACE INTO yf_cash_flow SELECT * FROM all_cashflow")
-
-        con.commit()
-        logger.info("--- Bulk Load Transaction Committed Successfully ---")
-
-    except Exception as e:
-        logger.error(f"Error during bulk load transaction: {e}. Rolling back.", exc_info=True)
+            return {'status': 'error', 'ticker': ticker_str, 'message': error_msg or "Exited retry loop unexpectedly."}
+        # This path should not be reachable due to the logic inside the loop, but is required for type checkers
+        return {'status': 'error', 'ticker': ticker_str, 'message': "Exited fetch worker unexpectedly."}
+    finally:
+        # Ensure the temporary cache directory is always removed
         try:
-            con.rollback()
-        except Exception as rb_e:
-            logger.error(f"Failed to rollback transaction: {rb_e}")
+            shutil.rmtree(temp_cache_dir)
+        except OSError as e:
+            logger.error(f"Error removing temp cache dir {temp_cache_dir}: {e}")
+
+def writer_process(queue: multiprocessing.Queue, parquet_dir: Path):
+    """
+    A separate process that listens on a queue for data and writes it to Parquet files.
+    """
+    parquet_converter.logger = logger # Share logger
+    batches: Dict[str, List[Any]] = {table_name: [] for table_name in ALL_YF_TABLES}
+    BATCH_SIZE = 250 # Number of tickers to accumulate before writing
+    FLUSH_TIMEOUT = 10.0 # seconds
+
+    def _flush_batch(data_type: str):
+        batch = batches[data_type]
+        if not batch: return
+
+        logger.info(f"Flushing batch of {len(batch)} records for '{data_type}'...")
+        if data_type == YF_INFO_FETCH_ERRORS:
+            df = pd.DataFrame(batch)
+        else:
+            df = pd.concat(batch, ignore_index=True)
+
+        # This simple approach works because each DataFrame was prepared by the worker
+        # and has the correct columns. The loader script will handle type casting.
+        parquet_converter.save_dataframe_to_parquet(df, parquet_dir / data_type)
+        batch.clear()
+
+    while True:
+        data_type = None # Initialize to prevent UnboundLocalError in exception logging
+        try:
+            # Use the specific queue from multiprocessing for type hints
+            item: Any = queue.get(timeout=FLUSH_TIMEOUT)
+            if item is None: # Sentinel
+                for table in ALL_YF_TABLES: _flush_batch(table)
+                logger.info("Writer process received sentinel. Shutting down.")
+                break
+
+            data_type, data = item
+            if data_type in batches:
+                batches[data_type].append(data)
+                if len(batches[data_type]) >= BATCH_SIZE:
+                    _flush_batch(data_type)
+
+        except (multiprocessing.queues.Empty, AttributeError): # Handle queue.Empty for type safety
+            logger.debug("Writer queue timeout, flushing any pending batches...")
+            for table in ALL_YF_TABLES: _flush_batch(table)
+        except Exception as e:
+            logger.error(f"Writer process failed to write data of type {data_type}: {e}", exc_info=True)
 
 def run_info_gathering_pipeline(config: AppConfig):
     """Main orchestration function for the info gathering pipeline."""
-    logger.info("--- Starting Yahoo Finance Info Gathering Pipeline ---")
+    logger.info("--- Starting Yahoo Finance Info to Parquet Pipeline ---")
+    logger.info(f"yfinance version: {yf.__version__}")
     start_time = time.time()
     max_workers = config.get_optional_int("YFINANCE_MAX_WORKERS", DEFAULT_MAX_WORKERS)
-    request_delay = config.get_optional_float("YFINANCE_REQUEST_DELAY", DEFAULT_REQUEST_DELAY)
-    logger.info(f"Using up to {max_workers} concurrent workers.")
-    logger.info(f"Request Delay: {request_delay}s")
+    logger.info(f"Using up to {max_workers} workers. Retry policy: {os.environ.get('YFINANCE_MAX_RETRIES', '5')} retries, {os.environ.get('YFINANCE_BASE_DELAY', '15.0')}s base delay.")
 
-    # Define PRAGMA settings for write-heavy operations
-    write_pragmas = {
-        'threads': os.cpu_count(),
-        'memory_limit': '4GB'
-    }
-    if config.DUCKDB_TEMP_DIR:
-        write_pragmas['temp_directory'] = f"'{config.DUCKDB_TEMP_DIR}'"
-
+    # This script now only needs a READ-ONLY connection to get the list of tickers.
     try:
-        with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=False, pragma_settings=write_pragmas) as con:
+        with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con:
             if not con:
                 logger.critical("Database connection failed. Exiting.")
                 return
 
-            # 1. Setup tables
-            setup_yf_tables(con)
-
-            # 2. Get tickers to process
-            tickers = get_tickers_to_process(con)
+            # 1. Get tickers to process
+            logger.info("Querying for unique tickers to process...")
+            tickers_df = con.sql("SELECT DISTINCT ticker FROM tickers ORDER BY ticker").df()
+            tickers = tickers_df['ticker'].tolist()
+            logger.info(f"Found {len(tickers)} total unique tickers in DB.")
             if not tickers:
                 logger.warning("No tickers found in the database to process.")
                 return
 
-            # 3. Process tickers concurrently
-            success_count = 0
-            error_count = 0
-            all_successful_results = []
+            # Exclude untrackable tickers
+            untrackable_expiry_days = config.get_optional_int("YFINANCE_UNTRACKABLE_EXPIRY_DAYS", 365)
+            untrackable_tickers = get_untrackable_tickers(con, expiry_days=untrackable_expiry_days)
+            initial_count = len(tickers)
+            tickers = [t for t in tickers if t not in untrackable_tickers]
+            skipped_untrackable = initial_count - len(tickers)
+            logger.info(f"Preparing to process {len(tickers)} tickers (skipped {skipped_untrackable} untrackable).")
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all jobs to the executor
-                future_to_ticker = {executor.submit(fetch_ticker_data, ticker, request_delay): ticker for ticker in tickers}
+        # DB connection is now closed.
 
-                # Process results as they complete
-                progress = tqdm(as_completed(future_to_ticker), total=len(tickers), desc="Gathering Company Info")
-                for future in progress:
-                    ticker_str = future_to_ticker[future]
-                    try:
-                        result = future.result()
-                        if result['status'] == 'success':
-                            all_successful_results.append(result)
-                            success_count += 1
-                        else:
-                            log_fetch_error(con, result['ticker'], result['message'])
-                            error_count += 1
-                    except Exception as exc:
-                        log_fetch_error(con, ticker_str, f"Unhandled exception in worker: {exc}")
+        # 2. Process tickers concurrently, writing to Parquet
+        success_count = 0
+        error_count = 0
+        jobs = [{'ticker': t, 'db_path': config.DB_FILE_STR} for t in tickers]
+
+        manager = multiprocessing.Manager()
+        write_queue = manager.Queue()
+
+        with ProcessPoolExecutor(max_workers=1) as writer_executor, \
+             ProcessPoolExecutor(max_workers=max_workers) as fetch_executor:
+
+            # Start the single writer process
+            writer_future = writer_executor.submit(writer_process, write_queue, config.PARQUET_DIR)
+
+            # Submit all fetch jobs to the executor
+            future_to_ticker: Dict[Future[Dict[str, Any]], str] = {fetch_executor.submit(fetch_worker, job): job['ticker'] for job in jobs}
+
+            # Process results as they complete
+            progress = tqdm(as_completed(future_to_ticker), total=len(jobs), desc="Gathering Company Info")
+            for future in progress:
+                ticker_str = future_to_ticker[future]
+                try:
+                    result = future.result()
+                    if result['status'] == 'success':
+                        success_count += 1
+                        # Put each successful dataframe onto the queue
+                        for table_name in ALL_YF_TABLES:
+                            if table_name in result and not result[table_name].empty:
+                                write_queue.put((table_name, result[table_name]))
+                    else: # status == 'error'
+                        # The worker now handles untrackable tickers directly.
+                        # We just log all other errors to the Parquet error file.
                         error_count += 1
-            
-            logger.info(f"Finished concurrent fetching. Success: {success_count}, Errors: {error_count}")
+                        message = result.get('message', 'Unknown error')
+                        # Avoid double-logging the untrackable ones to the error file
+                        if "not found on yfinance" not in message:
+                            error_record = {
+                                'ticker': result['ticker'],
+                                'error_timestamp': datetime.now(timezone.utc),
+                                'error_message': message
+                            }
+                            write_queue.put((YF_INFO_FETCH_ERRORS, error_record))
+                        else:
+                            # We still count it as an error for the summary, but it's been handled.
+                            logger.debug(f"Skipping error log for {ticker_str}, already marked as untrackable.")
 
-            # 4. Bulk load all collected data
-            if all_successful_results:
-                bulk_load_data(con, all_successful_results)
+                except Exception as exc:
+                    logger.error(f"Unhandled exception for ticker {ticker_str}: {exc}", exc_info=True)
+                    error_count += 1
+
+            # Signal the writer process to terminate and wait for it
+            write_queue.put(None)
+            writer_future.result()
 
     except Exception as pipeline_e:
         logger.critical(f"A critical error occurred in the pipeline: {pipeline_e}", exc_info=True)
 
     end_time = time.time()
-    logger.info("--- Yahoo Finance Info Gathering Pipeline Finished ---")
+    logger.info("--- Yahoo Finance Info to Parquet Pipeline Finished ---")
     logger.info(f"Total Time: {end_time - start_time:.2f} seconds")
     logger.info(f"Successfully fetched: {success_count} tickers")
     logger.info(f"Errors logged: {error_count} tickers")
-    logger.info("Check 'yf_info_fetch_errors' table for details on failures.")
+    logger.info(f"Data written to Parquet files in: {config.PARQUET_DIR}")
 
 if __name__ == "__main__":
     try:

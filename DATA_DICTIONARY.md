@@ -93,7 +93,13 @@ erDiagram
         bigint item_value
     }
     yf_major_holders {
+        varchar ticker PK
         double pct_insiders
+    }
+    yf_untrackable_tickers {
+        varchar ticker PK
+        varchar reason
+        timestamptz last_failed_timestamp
     }
 
     companies ||--o{ tickers : "has"
@@ -110,6 +116,7 @@ erDiagram
     tickers ||--o{ yf_balance_sheet : "reports"
     tickers ||--o{ yf_cash_flow : "reports"
     tickers |o--o| yf_major_holders : "has"
+    tickers |o--o| yf_untrackable_tickers : "may be"
 ```
 
 ---

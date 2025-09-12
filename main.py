@@ -58,6 +58,8 @@ SCRIPTS = {
     "parse_to_parquet": SCRIPT_DIR / "parse_to_parquet.py",
     "load": SCRIPT_DIR / "edgar_data_loader.py", # This now loads from Parquet
     "gather_stocks": SCRIPT_DIR / "stock_data_gatherer.py",
+    "load_stocks": SCRIPT_DIR / "load_supplementary_data.py",
+    "load_info": SCRIPT_DIR / "load_supplementary_data.py",
     "gather_info": SCRIPT_DIR / "stock_info_gatherer.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
@@ -116,7 +118,7 @@ def main():
         "step",
         nargs="?",
         default="all",
-        choices=["all", "fetch", "parse-to-parquet", "load", "gather-stocks", "gather-info", "validate", "cleanup"],
+        choices=["all", "fetch", "parse-to-parquet", "load", "gather-stocks", "load-stocks", "gather-info", "load-info", "validate", "cleanup"],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
 
@@ -124,19 +126,37 @@ def main():
 
     if args.step == "all":
         # Run cleanup at the end to free up space
-        pipeline_steps = ["fetch", "parse-to-parquet", "load", "gather_stocks", "gather_info", "validate", "cleanup"]
+        pipeline_steps = [
+            "fetch", "parse-to-parquet", "load",
+            "gather_stocks", "load_stocks", "gather_info", "load_info",
+            "validate", "cleanup"
+        ]
         logger.info("Running full pipeline...")
         for step_name in pipeline_steps:
-            # For the cleanup step in an 'all' run, pass the '--all' flag to remove both JSON and Parquet
-            script_args = ['--all'] if step_name == "cleanup" else None
-            if not run_script(step_name, script_args=script_args):
+            # Determine the correct arguments for each step in a full run
+            script_args = None
+            if step_name == "cleanup":
+                script_args = ['--all']
+            elif step_name == "load_stocks":
+                script_args = ['stock_history', 'stock_fetch_errors', '--full-refresh']
+            elif step_name == "load_info":
+                script_args = ['all_yf', '--full-refresh']
+
+            if not run_script(step_name, script_args):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
                 sys.exit(1)
         logger.info("Full pipeline completed successfully!")
     else:
         # Map CLI argument to script key
         script_key = args.step.replace("-", "_")
-        if not run_script(script_key):
+        script_args = None
+        # The new loader script requires an argument
+        if script_key == "load_stocks":
+            script_args = ['stock_history', 'stock_fetch_errors', '--full-refresh']
+        elif script_key == "load_info":
+            script_args = ['all_yf', '--full-refresh'] # Use the special 'all_yf' argument
+
+        if not run_script(script_key, script_args=script_args):
             sys.exit(1)
 
 if __name__ == "__main__":
