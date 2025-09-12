@@ -5,31 +5,67 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug: fetch",
+            "name": "Debug CLI: all",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/fetch_edgar_archives.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["all"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: parse-to-parquet",
+            "name": "Debug CLI: fetch",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/parse_to_parquet.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["fetch"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: load",
+            "name": "Debug CLI: parse-to-parquet",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/edgar_data_loader.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["parse-to-parquet"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: gather-stocks",
+            "name": "Debug CLI: load",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug CLI: validate",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["validate"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug CLI: cleanup",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["cleanup", "--all"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "--- (Individual Scripts Below) ---",
+            "type": "python",
+            "request": "launch",
+            "program": ""
+        },
+        {
+            "name": "Debug Script: gather-stocks",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/stock_data_gatherer.py",
@@ -37,7 +73,7 @@
             "justMyCode": true
         },
         {
-            "name": "Debug: gather-info",
+            "name": "Debug Script: gather-info",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/stock_info_gatherer.py",
@@ -45,28 +81,12 @@
             "justMyCode": true
         },
         {
-            "name": "Debug: gather-macro",
+            "name": "Debug Script: gather-macro",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/macro_data_gatherer.py",
             "console": "integratedTerminal",
             "justMyCode": true
         },
-        {
-            "name": "Debug: cleanup",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/cleanup_artifacts.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug: validate",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/validate_edgar_db.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        }
     ]
 }
