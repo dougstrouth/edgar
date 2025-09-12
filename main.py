@@ -171,11 +171,7 @@ def main():
         "step",
         nargs="?",
         default="all",
-        choices=[
-            "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
-            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro", "dbt",
-            "gather_market_risk", "load_market_risk",
-        ],
+        choices=list(SCRIPTS.keys()) + ["all"],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
 
@@ -204,6 +200,7 @@ def main():
             ("gather_market_risk", None),
             ("load_market_risk", ["market_risk_factors", "--full-refresh"]),
             ("dbt", ["run"]), # Run dbt models
+            ("dbt", ["test"]), # Test dbt models
             ("validate", None),
             ("cleanup", ['--all', '--cache'])
         ]

@@ -6,8 +6,10 @@ pyarrow>=19.0.1
 lxml>=6.0.1
 
 # dbt Transformation
+# Pin all dbt components to a compatible 1.9.x version range
+# to prevent the resolver from picking incompatible newer versions.
 dbt-duckdb==1.9.6
-dbt-core<1.10.0 # Constrain to be compatible with dbt-duckdb 1.9.6
+dbt-core~=1.9.0
 
 # Supplementary Data Gatherers
 yfinance>=0.2.55

@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "datetime>=5.5",
-    "dbt-core<1.10.0",
+    "dbt-core~=1.9.0",
     "dbt-duckdb==1.9.6",
     "debugpy>=1.8.14",
     "dotenv>=0.9.9",

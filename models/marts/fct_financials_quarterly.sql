@@ -33,21 +33,11 @@ quarterly_facts as (
 ),
 
 pivoted as (
-    -- Pivot the data to turn tags into columns
-    {{ dbt.pivot(
-        column='tag_name',
-        values=[
-            'Assets',
-            'Liabilities',
-            'StockholdersEquity',
-            'Revenues',
-            'NetIncomeLoss'
-        ],
-        agg='max',
-        then_value='value_numeric'
-    ) }}
-    from quarterly_facts
-    group by cik, period_end_date
+    -- Use DuckDB's native PIVOT for a cleaner and more efficient transformation
+    PIVOT quarterly_facts
+    ON tag_name IN ('Assets', 'Liabilities', 'StockholdersEquity', 'Revenues', 'NetIncomeLoss')
+    USING MAX(value_numeric)
+    GROUP BY cik, period_end_date
 )
 
 select * from pivoted

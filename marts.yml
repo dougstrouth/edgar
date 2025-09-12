@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: dim_companies
+    description: "Dimension table for companies, enriched with a primary ticker for easier analysis."
+    columns:
+      - name: cik
+        description: "The company's 10-digit Central Index Key. This is the primary key."
+        tests:
+          - unique
+          - not_null
+      - name: primary_name
+        description: "The most recent official name of the entity."
+        tests:
+          - not_null
+
+  - name: fct_financials_quarterly
+    description: "Fact table with key financial metrics pivoted into columns for easy analysis."
+    columns:
+      - name: cik
+        description: "Foreign key to the dim_companies table."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_companies')
+              field: cik
+      - name: period_end_date
+        description: "The end date of the reporting period."
+        tests:
+          - not_null
+
+  - name: fct_combined_financials
+    description: "Fact table combining annual financial facts with macro and market risk data."

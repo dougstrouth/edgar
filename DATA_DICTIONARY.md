@@ -119,6 +119,7 @@ erDiagram
     xbrl_tags ||--o{ xbrl_facts : "defines"
     tickers |o--o| stock_history : "has history for"
     tickers |o--o| yf_profile_metrics : "has profile"
+    tickers |o--o| dim_companies : "is primary for"
     tickers ||--o{ yf_stock_actions : "has"
     tickers ||--o{ yf_recommendations : "has"
     tickers ||--o{ yf_income_statement : "reports"
@@ -129,6 +130,8 @@ erDiagram
     tickers |o--o| stock_fetch_errors : "may have"
     market_risk_factors }o..o{ stock_history : "provides context for"
     macro_economic_data }o..o{ xbrl_facts : "provides context for"
+    dim_companies }o..o{ fct_financials_quarterly : "has"
+    dim_companies }o..o{ fct_combined_financials : "has"
 ```
 
 ---

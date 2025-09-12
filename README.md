@@ -1,4 +1,4 @@
-﻿﻿﻿﻿# EDGAR Analytics Pipeline
+﻿﻿﻿﻿﻿﻿﻿﻿# EDGAR Analytics Pipeline
 
 This project provides a robust, end-to-end data engineering pipeline for downloading, parsing, and storing financial data from the U.S. Securities and Exchange Commission (SEC) EDGAR system and other supplementary sources. The data is structured and loaded into a DuckDB database, creating a powerful, local analytics engine suitable for financial analysis and machine learning applications.
 
@@ -14,6 +14,9 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
     *   **Federal Reserve (FRED)**: Gathers key macroeconomic time-series data (e.g., GDP, CPI, interest rates) to provide economic context for financial models.
 *   **Resilient API Interaction**:
     *   **Intelligent Retries**: Implements exponential backoff with jitter for handling API rate limits from external sources like Yahoo Finance.
+*   **Data Transformation with dbt**:
+    *   Utilizes dbt (data build tool) to transform raw source data into clean, analytics-ready "mart" tables.
+    *   Models are defined in standard SQL, making them easy to understand, maintain, and test.
     *   **Failure Tracking**: Automatically identifies and logs tickers that consistently fail (e.g., "No Data Found") to a dedicated table, preventing wasted API calls on subsequent runs. These entries expire after a configurable period (default: 365 days) to allow for re-checking.
 *   **Modular & Extensible Architecture**: Each stage of the pipeline (fetch, parse, load, gather) is a separate, self-contained script, making it easy to maintain, debug, and extend with new data sources or processing steps.
 *   **Centralized Orchestration**: A single `main.py` entry point provides a command-line interface (CLI) to run the entire pipeline or any specific step, simplifying execution.
@@ -33,6 +36,7 @@ The pipeline is composed of several key scripts:
 1.  **`fetch_edgar_archives.py`**: Downloads bulk data ZIP archives from the SEC.
 2.  **`parse_to_parquet.py`**: Parses the raw JSON files from the archives into structured Parquet files.
 3.  **`edgar_data_loader.py`**: Loads the core EDGAR data from Parquet into the DuckDB database.
+4.  **dbt models (`/models`)**: Transforms the raw data into analytics-ready tables.
 
 ### Supplementary Data Gathering
 
