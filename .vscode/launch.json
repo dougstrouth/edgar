@@ -45,6 +45,22 @@
             "justMyCode": true
         },
         {
+            "name": "Debug: gather-macro",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/macro_data_gatherer.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug: cleanup",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/cleanup_artifacts.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
             "name": "Debug: validate",
             "type": "python",
             "request": "launch",

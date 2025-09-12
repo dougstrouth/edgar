@@ -30,6 +30,7 @@ import logging
 import runpy
 from pathlib import Path
 import time
+from typing import Optional, List
 
 # Ensure utility modules can be found. This is generally good practice,
 # especially if the script is run from a different working directory.
@@ -59,6 +60,7 @@ SCRIPTS = {
     "load": SCRIPT_DIR / "edgar_data_loader.py", # This now loads from Parquet
     "gather_stocks": SCRIPT_DIR / "stock_data_gatherer.py",
     "gather_info": SCRIPT_DIR / "stock_info_gatherer.py",
+    "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
 }
@@ -116,7 +118,7 @@ def main():
         "step",
         nargs="?",
         default="all",
-        choices=["all", "fetch", "parse-to-parquet", "load", "gather-stocks", "gather-info", "validate", "cleanup"],
+        choices=["all", "fetch", "parse-to-parquet", "load", "validate", "cleanup"],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
 
@@ -132,7 +134,14 @@ def main():
 
     if args.step == "all":
         # Run cleanup at the end to free up space
-        pipeline_steps = ["fetch", "parse-to-parquet", "load", "gather_stocks", "gather_info", "validate", "cleanup"]
+        pipeline_steps = [
+            "fetch", "parse-to-parquet", "load",
+            # "gather_stocks",  # Temporarily disabled due to yfinance rate-limiting
+            # "gather_info",    # Temporarily disabled due to yfinance rate-limiting
+            # "gather_macro",   # Temporarily disabled
+            "validate",
+            "cleanup"
+        ]
         logger.info("Running full pipeline...")
         for step_name in pipeline_steps:
             script_args = ['--json'] if step_name == "cleanup" else None

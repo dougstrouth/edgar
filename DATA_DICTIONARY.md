@@ -95,6 +95,11 @@ erDiagram
     yf_major_holders {
         double pct_insiders
     }
+    macro_economic_data {
+        varchar series_id PK
+        date date PK
+        double value
+    }
 
     companies ||--o{ tickers : "has"
     companies ||--o{ former_names : "had"
@@ -110,6 +115,8 @@ erDiagram
     tickers ||--o{ yf_balance_sheet : "reports"
     tickers ||--o{ yf_cash_flow : "reports"
     tickers |o--o| yf_major_holders : "has"
+    macro_economic_data }o..o{ xbrl_facts : "provides context for"
+    macro_economic_data }o..o{ xbrl_facts : "provides context for"
 ```
 
 ---
