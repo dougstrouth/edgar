@@ -21,8 +21,9 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timezone, timedelta
-from typing import Optional, Dict, List, Set, Tuple
+from typing import Optional, Dict, List, Set, Tuple, Any
 
+import requests
 import duckdb
 import pandas as pd
 import yfinance as yf
@@ -129,37 +130,6 @@ def clear_stock_tables(con: duckdb.DuckDBPyConnection):
         else: logger.warning(f"Table {ERROR_TABLE_NAME} not found.")
     except Exception as e: logger.error(f"Failed clear tables: {e}", exc_info=True); raise
 
-def log_fetch_error(
-    con: duckdb.DuckDBPyConnection,
-    cik: Optional[str],
-    ticker: Optional[str],
-    error_type: str,
-    message: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None
-):
-    """Logs a fetch error to the database and the logger."""
-    timestamp = datetime.now(timezone.utc)
-    # Log to standard logger first
-    logger.warning(f"Log err: CIK={cik}, Ticker={ticker}, Type={error_type}, Msg={message}")
-    # Log to database
-    try:
-        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
-        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
-        # Prepare data tuple, handle potential None values gracefully
-        params = [
-            cik, ticker, timestamp, error_type, message, start_date_obj, end_date_obj
-        ]
-        con.execute(f"INSERT INTO {ERROR_TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?)", params)
-    except duckdb.Error as db_err:
-         # Check if error is due to transaction context (already rolled back maybe)
-        if "TransactionContext Error" in str(db_err) or "Connection has been closed" in str(db_err):
-            logger.error(f"Could not log DB error for Ticker {ticker} (transaction likely aborted): {db_err}")
-        else:
-            logger.error(f"CRITICAL DB error inserting error log CIK {cik}/Ticker {ticker}: {db_err}", exc_info=True)
-    except Exception as e:
-        logger.error(f"CRITICAL unexpected error inserting error log CIK {cik}/Ticker {ticker}: {e}", exc_info=True)
-
 
 def load_stock_data_batch(
     con: duckdb.DuckDBPyConnection,
@@ -172,9 +142,6 @@ def load_stock_data_batch(
         full_batch_df = pd.concat(stock_dfs, ignore_index=True)
     except Exception as concat_e:
         logger.error(f"Error concat DFs: {concat_e}", exc_info=True)
-        # Log error for each ticker represented in the failed batch
-        # This is less precise in the new model, but we can log a general error.
-        log_fetch_error(con, None, "BATCH_CONCAT_FAIL", 'Load Error', f'Concat fail: {concat_e}')
         return False
 
     if full_batch_df.empty: logger.warning("Batch DF empty after concat."); return True
@@ -206,8 +173,6 @@ def load_stock_data_batch(
         logger.error(f"DB err batch insert: {e}", exc_info=True)
         try: con.unregister(reg_name) # Attempt to unregister even on failure
         except: pass
-        # Log error for each ticker in the failed batch
-        log_fetch_error(con, None, "BATCH_INSERT_FAIL", 'Load Error', f'Batch insert failed: {e}')
         return False
 
 # --- Stock Data Fetching (Updated to use logger) ---
@@ -216,7 +181,12 @@ def fetch_stock_history(
     start_date: str,
     end_date: str
 ) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
-    """Fetches stock history using yfinance for a given ticker and date range."""
+    """
+    Fetches stock history using yfinance for a given ticker and date range.
+    This function is designed to be thread-safe.
+    """
+    yf.set_tz_cache_location(os.devnull)
+
     logger.debug(f"Fetching {ticker} from {start_date} to {end_date}")
     try:
         start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
@@ -227,7 +197,11 @@ def fetch_stock_history(
             return None, "Start date after end date"
 
         # Fetch data including the end_date by adding one day to the end param
-        stock = yf.Ticker(ticker)
+        # Use a standard requests.Session object to bypass yfinance's internal,
+        # file-based caching which is not thread-safe. Each thread will get
+        # its own session, preventing file access conflicts.
+        session = requests.Session()
+        stock = yf.Ticker(ticker, session=session)
         history = stock.history(start=start_date, end=(end_dt + timedelta(days=1)).strftime('%Y-%m-%d'), interval="1d")
 
         if history.empty:
@@ -303,7 +277,6 @@ def fetch_worker(job: Dict[str, Any], delay: float) -> Dict[str, Any]:
 def run_stock_data_pipeline(
     config: AppConfig,      # Pass config
     mode: str = 'append',   # Changed default to 'append'
-    batch_size: int = DEFAULT_BATCH_SIZE,
     append_start_date: Optional[str] = None,
     target_tickers: Optional[List[str]] = None,
     db_path_override: Optional[str] = None
@@ -319,7 +292,6 @@ def run_stock_data_pipeline(
     logger.info(f"Run Mode: {mode}")
     if target_tickers: logger.info(f"Target Tickers: {target_tickers}")
     if mode == 'append' and append_start_date: logger.info(f"Append Start Date Override: {append_start_date}")
-    logger.info(f"Batch Size (Tickers): {batch_size}")
     logger.info(f"Request Delay: {request_delay}s")
 
 
@@ -327,10 +299,11 @@ def run_stock_data_pipeline(
     if mode not in valid_modes: logger.error(f"Invalid mode '{mode}'. Exiting."); return
 
     # Stats counters
-    fetch_errors_count = 0; load_errors_count = 0; total_tickers_to_process = 0
+    fetch_errors_count = 0; load_errors_count = 0; total_tickers_to_process = 0; success_count = 0; skipped_due_to_dates = 0
 
+    # --- STAGE 1: SETUP & JOB PREPARATION (DB Connection is opened and closed here) ---
+    jobs_to_run: List[Dict[str, Any]] = []
     try:
-        # Define PRAGMA settings for write-heavy operations
         write_pragmas = {
             'threads': os.cpu_count(),
             'memory_limit': '4GB'
@@ -338,40 +311,33 @@ def run_stock_data_pipeline(
         if config.DUCKDB_TEMP_DIR:
             write_pragmas['temp_directory'] = f"'{config.DUCKDB_TEMP_DIR}'"
 
-        # Use context manager with override or config default path
-        with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False, pragma_settings=write_pragmas) as write_conn:
-            if not write_conn:
+        with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False, pragma_settings=write_pragmas) as conn:
+            if not conn:
                 logger.critical("Exiting due to database connection failure.")
-                return # Cannot proceed without connection
+                return
 
-            # --- Mode Handling & Setup ---
             try:
-                write_conn.begin() # Start transaction for setup/clear
-                if mode == 'drop_tables': drop_stock_tables(write_conn); write_conn.commit(); logger.info("Drop finished."); return
-                setup_tables(write_conn)
-                if mode == 'full_refresh': clear_stock_tables(write_conn); logger.info("Full refresh clear done.")
-                write_conn.commit() # Commit setup/clear transaction
+                conn.begin()
+                if mode == 'drop_tables': drop_stock_tables(conn); conn.commit(); logger.info("Drop finished."); return
+                setup_tables(conn)
+                if mode == 'full_refresh': clear_stock_tables(conn); logger.info("Full refresh clear done.")
+                conn.commit()
             except Exception as setup_e:
                 logger.error(f"Failed setup/clear: {setup_e}. Exiting.", exc_info=True)
-                try: write_conn.rollback()
+                try: conn.rollback()
                 except: pass
-                return # Exit if setup fails
-            
-            # --- Identify Tickers to Process ---
-            tickers_to_process = get_tickers_to_process(write_conn, target_tickers)
+                return
+
+            tickers_to_process = get_tickers_to_process(conn, target_tickers)
             if not tickers_to_process:
                 logger.warning("No tickers found in the database to process.")
                 return
 
-            # --- Get Latest Dates for Append Mode ---
             latest_dates = {}
             if mode == 'append':
-                latest_dates = get_latest_stock_dates(write_conn, target_tickers=tickers_to_process)
+                latest_dates = get_latest_stock_dates(conn, target_tickers=tickers_to_process)
 
-            # --- Prepare Jobs for Concurrent Fetching ---
             total_tickers_to_process = len(tickers_to_process)
-            jobs_to_run: List[Dict[str, Any]] = []
-            skipped_due_to_dates = 0
             logger.info(f"Preparing fetch jobs for {total_tickers_to_process} unique tickers...")
 
             for ticker in tqdm(tickers_to_process, desc="Preparing Jobs"):
@@ -384,7 +350,7 @@ def run_stock_data_pipeline(
                     if append_start_date:
                         try: start_date_override = datetime.strptime(append_start_date, '%Y-%m-%d').date()
                         except ValueError: logger.error(f"Invalid append_start_date: {append_start_date}. Ignored.")
-                    
+
                     if start_date_override: fetch_start_date = start_date_override
                     elif last_date: fetch_start_date = last_date + timedelta(days=1)
                     else: fetch_start_date = date(1990, 1, 1) # Fallback for new ticker: fetch from a long time ago
@@ -392,13 +358,10 @@ def run_stock_data_pipeline(
                 else: # initial_load or full_refresh
                     fetch_start_date = date(1990, 1, 1) # Fetch all available history
 
-                # Validate dates before fetching
                 if not fetch_start_date or not fetch_end_date:
-                     try: write_conn.begin(); log_fetch_error(write_conn, None, ticker, 'Date Error', 'Invalid fetch dates generated.'); write_conn.commit()
-                     except Exception as log_e: logger.error(f"Failed log Date err {ticker}: {log_e}"); write_conn.rollback()
+                     logger.warning(f"Invalid fetch dates generated for {ticker}. Skipping.")
                      skipped_due_to_dates += 1; continue
                 if fetch_start_date > fetch_end_date:
-                    # This is a valid state (no new data to fetch), not an error.
                     logger.debug(f"Skipping {ticker}, start date {fetch_start_date} is after end date {fetch_end_date}.")
                     skipped_due_to_dates += 1
                     continue
@@ -408,56 +371,77 @@ def run_stock_data_pipeline(
                     'start_date': fetch_start_date.strftime('%Y-%m-%d'),
                     'end_date': fetch_end_date.strftime('%Y-%m-%d')
                 })
+        # The 'with' block for the DB connection ends here, ensuring it is closed.
+    except Exception as e:
+        logger.critical(f"Failed during STAGE 1 (Job Preparation): {e}", exc_info=True)
+        return # Exit if we can't even prepare the jobs
 
-            logger.info(f"Prepared {len(jobs_to_run)} jobs. Skipped {skipped_due_to_dates} tickers due to date ranges.")
+    logger.info(f"Prepared {len(jobs_to_run)} jobs. Skipped {skipped_due_to_dates} tickers.")
 
-            # --- Concurrent Fetching ---
-            all_fetched_dfs: List[pd.DataFrame] = []
-            success_count = 0
-            if jobs_to_run:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_job = {executor.submit(fetch_worker, job, request_delay): job for job in jobs_to_run}
-                    progress = tqdm(as_completed(future_to_job), total=len(jobs_to_run), desc="Fetching Stock Data")
-
-                    for future in progress:
-                        job = future_to_job[future]
-                        try:
-                            result = future.result()
-                            if result['status'] == 'success':
-                                if result['data'] is not None and not result['data'].empty:
-                                    all_fetched_dfs.append(result['data'])
-                                success_count += 1
-                            else:
-                                fetch_errors_count += 1
-                                log_fetch_error(write_conn, job['cik'], job['ticker'], 'Fetch Error', result['message'], job['start_date'], job['end_date'])
-                        except Exception as exc:
-                            fetch_errors_count += 1
-                            log_fetch_error(write_conn, job['cik'], job['ticker'], 'Worker Error', f"Unhandled exception: {exc}", job['start_date'], job['end_date'])
-
-            logger.info(f"Concurrent fetching complete. Success: {success_count}, Errors: {fetch_errors_count}")
-
-            # --- Bulk Load ---
-            if all_fetched_dfs:
-                logger.info(f"Starting bulk load of {len(all_fetched_dfs)} fetched dataframes.")
-                insert_mode = "REPLACE" if mode != 'full_refresh' else "INSERT"
+    # --- STAGE 2: CONCURRENT FETCHING (NO DB CONNECTION IS OPEN) ---
+    all_results: List[Dict[str, Any]] = []
+    if jobs_to_run:
+        logger.info("--- Starting STAGE 2: Concurrent Fetching ---")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_job = {executor.submit(fetch_worker, job, request_delay): job for job in jobs_to_run}
+            progress = tqdm(as_completed(future_to_job), total=len(jobs_to_run), desc="Fetching Stock Data")
+            for future in progress:
                 try:
-                    write_conn.begin()
+                    result = future.result()
+                    all_results.append(result)
+                except Exception as exc:
+                    job = future_to_job[future]
+                    all_results.append({'status': 'error', 'job': job, 'message': f"Unhandled exception in worker: {exc}"})
+        logger.info(f"Concurrent fetching complete. Got {len(all_results)} results.")
+
+    # --- STAGE 3: DATA & ERROR LOADING (New DB connection is opened here) ---
+    if all_results:
+        logger.info("--- Starting STAGE 3: Processing and Loading Results ---")
+        all_fetched_dfs: List[pd.DataFrame] = []
+        errors_to_log: List[Dict[str, Any]] = []
+
+        for result in tqdm(all_results, desc="Processing Results"):
+            if result['status'] == 'success':
+                if result.get('data') is not None and not result['data'].empty:
+                    all_fetched_dfs.append(result['data'])
+                success_count += 1
+            else: # status == 'error'
+                job = result['job']
+                errors_to_log.append({
+                    'cik': job['cik'], 'ticker': job['ticker'], 'error_timestamp': datetime.now(timezone.utc),
+                    'error_type': 'Fetch Error', 'error_message': result['message'],
+                    'start_date_req': datetime.strptime(job['start_date'], '%Y-%m-%d').date(),
+                    'end_date_req': datetime.strptime(job['end_date'], '%Y-%m-%d').date()
+                })
+
+        fetch_errors_count = len(errors_to_log)
+
+        try:
+            # Re-establish connection for writing results
+            with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False, pragma_settings=write_pragmas) as write_conn:
+                if not write_conn:
+                    logger.error("Could not reconnect to DB to load results.")
+                    return
+
+                write_conn.begin()
+                # Bulk log errors
+                if errors_to_log:
+                    logger.info(f"Logging {len(errors_to_log)} fetch errors to the database...")
+                    error_df = pd.DataFrame(errors_to_log)
+                    write_conn.execute(f"INSERT INTO {ERROR_TABLE_NAME} SELECT * FROM error_df")
+
+                # Bulk load data
+                if all_fetched_dfs:
+                    logger.info(f"Starting bulk load of {len(all_fetched_dfs)} fetched dataframes.")
+                    insert_mode = "REPLACE" if mode != 'full_refresh' else "INSERT"
                     if not load_stock_data_batch(write_conn, all_fetched_dfs, insert_mode):
-                        load_errors_count = len(all_fetched_dfs) # Mark all as failed if batch fails
-                    write_conn.commit()
-                except Exception as e:
-                    logger.error(f"Critical error during bulk load transaction: {e}", exc_info=True)
-                    load_errors_count = len(all_fetched_dfs)
-                    try: write_conn.rollback()
-                    except Exception as log_e: logger.error(f"Failed log Start>End err {ticker}: {log_e}"); write_conn.rollback()
+                        load_errors_count = len(all_fetched_dfs)
+                
+                write_conn.commit()
+                logger.info("Finished loading data and errors.")
 
-            # --- End of Loop ---
-            logger.info("Finished processing all identified tickers.")
-
-        # Context manager handles final commit/rollback/close for the main connection
-
-    except Exception as pipeline_e:
-         logger.error(f"Pipeline error outside main loop: {pipeline_e}", exc_info=True)
+        except Exception as e:
+            logger.critical(f"Failed during STAGE 3 (Data Loading): {e}", exc_info=True)
 
     end_run_time = time.time()
     logger.info(f"--- Stock Data Pipeline Finished ---")
@@ -485,7 +469,6 @@ if __name__ == "__main__":
     run_stock_data_pipeline(
         config=config,
         mode='append', # Default mode
-        batch_size=config.get_optional_int("STOCK_GATHERER_BATCH_SIZE", DEFAULT_BATCH_SIZE), # Example optional config
         # append_start_date=config.get_optional_var("STOCK_GATHERER_APPEND_START"), # Example optional config
         # target_tickers=None, # Or load from config/args
         db_path_override=None # Use DB from config by default

@@ -141,6 +141,17 @@ class AppConfig:
                 return default
         return default
 
+    def get_optional_float(self, key: str, default: Optional[float] = None) -> Optional[float]:
+        """Gets an optional float variable from the environment."""
+        val = os.environ.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                config_logger.warning(f"Could not parse env var '{key}' value '{val}' as float. Using default.")
+                return default
+        return default
+
     def get_optional_bool(self, key: str, default: bool = False) -> bool:
         """Gets an optional boolean variable from the environment."""
         val = os.environ.get(key, '').lower()
