@@ -88,6 +88,51 @@ class AnalysisClient:
             logger.error(f"Error querying CIK for {identifier}: {e}", exc_info=True)
             return None
 
+    def get_macro_data(self, series_ids: List[str], start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        """
+        Retrieves and pivots macroeconomic data for a given set of series IDs.
+
+        Args:
+            series_ids: A list of FRED series IDs to retrieve.
+            start_date: Optional start date in 'YYYY-MM-DD' format.
+            end_date: Optional end date in 'YYYY-MM-DD' format.
+
+        Returns:
+            A pandas DataFrame indexed by date with series IDs as columns.
+        """
+        if not self.conn: logger.error("No database connection."); return pd.DataFrame()
+
+        query = "SELECT date, series_id, value FROM macro_economic_data WHERE series_id IN ({})".format(','.join('?' * len(series_ids)))
+        params = series_ids
+        if start_date: query += " AND date >= ?"; params.append(start_date)
+        if end_date: query += " AND date <= ?"; params.append(end_date)
+
+        df = self.conn.execute(query, params).fetchdf()
+        if df.empty: return pd.DataFrame()
+
+        # Pivot the table to get series as columns
+        pivot_df = df.pivot(index='date', columns='series_id', values='value').sort_index()
+        return pivot_df
+
+    def get_market_risk_data(self, model: str = 'ff_5_factor_daily', start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        """
+        Retrieves market risk factor data for a specific model.
+
+        Args:
+            model: The factor model to retrieve (e.g., 'ff_5_factor_daily').
+            start_date: Optional start date in 'YYYY-MM-DD' format.
+            end_date: Optional end date in 'YYYY-MM-DD' format.
+
+        Returns:
+            A pandas DataFrame indexed by date.
+        """
+        if not self.conn: logger.error("No database connection."); return pd.DataFrame()
+        query = "SELECT * FROM market_risk_factors WHERE factor_model = ?"
+        params = [model]
+        if start_date: query += " AND date >= ?"; params.append(start_date)
+        if end_date: query += " AND date <= ?"; params.append(end_date)
+        return self.conn.execute(query, params).fetchdf().set_index('date').sort_index()
+
     def get_financial_facts(self, cik: str, tags: List[str], forms: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Retrieves specific financial facts for a given CIK.
