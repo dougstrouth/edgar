@@ -11,6 +11,11 @@ wheels/
 # Caches
 .cache/
 
+# dbt-generated files
+dbt_packages/
+target/
+logs/ # Already present, but good to confirm
+
 # Virtual environments
 .venv
 .env

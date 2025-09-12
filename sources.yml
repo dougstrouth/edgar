@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: edgar_source
+    # For dbt_duckdb, the database is the file itself.
+    # The schema is 'main' by default in DuckDB.
+    schema: main 
+    tables:
+      - name: xbrl_facts
+      - name: macro_economic_data
+      - name: market_risk_factors

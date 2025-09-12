@@ -83,6 +83,7 @@ def run_script(script_key: str, script_args: Optional[List[str]] = None) -> bool
         True if the script ran successfully, False otherwise.
     """
     script_path = SCRIPTS.get(script_key)
+
     if not script_path or not script_path.is_file():
         logger.error(f"Script for '{script_key}' not found at: {script_path}")
         return False
