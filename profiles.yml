@@ -8,7 +8,7 @@ edgar_analytics:
   outputs:
     dev:
       type: duckdb
-      path: 'C:/Users/user/Documents/Code/edgar/data/edgar_data.db' # IMPORTANT: Replace with the actual path from your .env file
+      path: 'C:/Users/user/Documents/edgar_data/db/edgar_analytics.duckdb'
       # Add any extensions you use, e.g.:
       # extensions:
       #   - "httpfs"

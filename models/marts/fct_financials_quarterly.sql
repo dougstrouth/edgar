@@ -35,8 +35,14 @@ quarterly_facts as (
 pivoted as (
     -- Pivot the data to turn tags into columns
     {{ dbt.pivot(
-        'tag_name',
-        dbt.get_column_values(table=ref('quarterly_facts'), column='tag_name'),
+        column_to_pivot='tag_name',
+        list_of_pivot_values=[
+            'Assets',
+            'Liabilities',
+            'StockholdersEquity',
+            'Revenues',
+            'NetIncomeLoss'
+        ],
         agg='max',
         then_value='value_numeric'
     ) }}

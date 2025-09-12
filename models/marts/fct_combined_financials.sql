@@ -12,21 +12,21 @@ WITH xbrl_facts_filtered AS (
         period_end_date,
         filed_date,
         value_numeric
-    FROM {{ source('edgar_source', 'xbrl_facts') }}
+    FROM {{ source('edgar_raw', 'xbrl_facts') }}
     WHERE form = '10-K'
       AND tag_name IN ('Revenues', 'NetIncomeLoss', 'Assets', 'Liabilities', 'StockholdersEquity')
 ),
 
 macro_data AS (
     -- Select and pivot key macro indicators
-    SELECT * FROM {{ source('edgar_source', 'macro_economic_data') }}
+    SELECT * FROM {{ source('edgar_raw', 'macro_economic_data') }}
     PIVOT (MAX(value) FOR series_id IN ('GDP', 'CPIAUCSL', 'UNRATE'))
     AS p(date, gdp, cpi, unrate)
 ),
 
 market_risk_data AS (
     -- Select daily market risk factors
-    SELECT * FROM {{ source('edgar_source', 'market_risk_factors') }}
+    SELECT * FROM {{ source('edgar_raw', 'market_risk_factors') }}
     WHERE factor_model = 'ff_5_factor_daily'
 )
 

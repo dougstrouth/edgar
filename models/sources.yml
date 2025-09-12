@@ -11,3 +11,6 @@ sources:
       - name: xbrl_facts
       - name: tickers
       # Add other raw tables here as you need them (e.g., yf_income_statement)
+      - name: macro_economic_data
+      - name: market_risk_factors
+      # Add other raw tables here as you need them
