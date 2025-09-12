@@ -2,10 +2,13 @@
 """
 Yahoo Finance Company Information Gatherer.
 
-Fetches and stores supplementary company data from yfinance, such as
-profile metrics, recommendations, and major holders. This data complements
-the historical stock prices and SEC filings.
+Fetches and stores supplementary company financial statement data from yfinance
+(Income Statement, Balance Sheet, Cash Flow). This data complements the
+historical stock prices and SEC filings.
 
+Note: This script was previously configured to fetch profile metrics,
+recommendations, and major holders, but this functionality has been
+temporarily disabled to focus on core financial statements.
 Uses:
 - config_utils.AppConfig for loading configuration.
 - logging_utils.setup_logging for standardized logging.

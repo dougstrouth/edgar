@@ -1,4 +1,4 @@
-﻿# EDGAR Analytics Pipeline
+﻿﻿# EDGAR Analytics Pipeline
 
 This project provides a robust, end-to-end data engineering pipeline for downloading, parsing, and storing financial data from the U.S. Securities and Exchange Commission (SEC) EDGAR system and other supplementary sources. The data is structured and loaded into a DuckDB database, creating a powerful, local analytics engine suitable for financial analysis and machine learning applications.
 

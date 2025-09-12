@@ -92,6 +92,16 @@ erDiagram
         varchar item_name PK
         bigint item_value
     }
+    stock_fetch_errors {
+        varchar cik
+        varchar ticker
+        timestamptz error_timestamp
+        varchar error_message
+    }
+    yf_untrackable_tickers {
+        varchar ticker PK
+        varchar reason
+    }
     yf_major_holders {
         double pct_insiders
     }
@@ -115,7 +125,8 @@ erDiagram
     tickers ||--o{ yf_balance_sheet : "reports"
     tickers ||--o{ yf_cash_flow : "reports"
     tickers |o--o| yf_major_holders : "has"
-    macro_economic_data }o..o{ xbrl_facts : "provides context for"
+    tickers |o--o| yf_untrackable_tickers : "may be"
+    tickers |o--o| stock_fetch_errors : "may have"
     macro_economic_data }o..o{ xbrl_facts : "provides context for"
 ```
 
