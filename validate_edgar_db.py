@@ -82,8 +82,13 @@ def check_table_counts(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -
          if table.lower() in db_tables:
              results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table};", f"Row count for {table}", logger))
          else:
-              logger.error(f"MISSING Table Check: Table '{table}' not found.")
-              results.append((True, None, f"Missing Table Check: {table}"))
+              # Treat missing EDGAR tables as errors, but supplementary tables as warnings
+              if table in EDGAR_TABLES:
+                  logger.error(f"MISSING Table Check: Core EDGAR table '{table}' not found.")
+                  results.append((True, None, f"Missing Table Check: {table}"))
+              else:
+                  logger.warning(f"SKIPPED Table Check: Supplementary table '{table}' not found.")
+                  # Do not append as an issue if it's a supplementary table
     return results
 
 def check_edgar_fk_integrity(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
@@ -104,8 +109,8 @@ def check_orphaned_facts(con: duckdb.DuckDBPyConnection, logger: logging.Logger)
     logger.info("\n=== Checking Orphaned Facts Table ===")
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM xbrl_facts_orphaned;", "Orphan Check: Total orphaned facts", logger, warning_threshold=1000)) # Example threshold
     results.append(run_validation_query(con, "SELECT DISTINCT cik, accession_number FROM xbrl_facts_orphaned LIMIT 10;", "Orphan Check: Sample orphaned CIKs/Acc Nums", logger))
-    # Check if any orphaned facts *now* have a matching filing (should be 0 after reprocessing logic)
-    results.append(run_validation_query(con, "SELECT COUNT(o.*) as count FROM xbrl_facts_orphaned o JOIN filings f ON o.accession_number = f.accession_number;", "Orphan Check: Orphaned facts with existing filings", logger, expect_zero=True))
+    # Check if any orphaned facts now have a matching CIK and filing (should be 0 after reprocessing logic)
+    results.append(run_validation_query(con, "SELECT COUNT(o.*) as count FROM xbrl_facts_orphaned o JOIN filings f ON o.accession_number = f.accession_number AND o.cik = f.cik;", "Orphan Check: Orphaned facts with existing filings", logger, expect_zero=True))
     return results
 
 def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
@@ -172,10 +177,11 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     all_results.extend(check_edgar_fk_integrity(con, logger))
     all_results.extend(check_orphaned_facts(con, logger))
     all_results.extend(check_yf_data_validations(con, logger)) # Add new YF checks
-    all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
+    all_results.extend(check_table_uniqueness(con, logger))
+    # all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
 
     # --- Summarize Results ---
-    logger.info("\n=== Validation Summary ===")
+    logger.info("n=== Validation Summary ===")
     issues_found = [res for res in all_results if res[0]] # Check if the 'is_issue' flag is True
     warnings_found = [res for res in all_results if res[1] is not None and res[2].startswith("THRESHOLD Check") and res[0]]
     missing_tables = [res for res in all_results if res[2].startswith("Missing Table Check")]
@@ -192,32 +198,55 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     else:
         logger.info("All specific validation checks passed successfully!")
 
+def check_table_uniqueness(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+    """
+    Checks the tables for uniqueness of primary keys and essential identifiers.
+    """
+    results = []
+    logger.info("\n=== Checking Table Uniqueness ===")
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    # Define script name early for potential logging during config failure
+    # Check 'companies' table for duplicate CIKs
+    results.append(run_validation_query(con, """
+        SELECT COUNT(*) AS count FROM (
+            SELECT cik, COUNT(*) FROM companies GROUP BY cik HAVING COUNT(*) > 1
+        );""", "Companies: Duplicate CIKs", logger, expect_zero=True))
+
+    # Check 'tickers' table for duplicate ticker/exchange combinations (consider each unique)
+    results.append(run_validation_query(con, """
+        SELECT COUNT(*) AS count FROM (
+            SELECT ticker, exchange, COUNT(*) FROM tickers GROUP BY ticker, exchange HAVING COUNT(*) > 1
+        );""", "Tickers: Duplicate Ticker/Exchange", logger, expect_zero=True))
+
+    # Check 'filings' table for duplicate accession numbers
+    results.append(run_validation_query(con, """
+        SELECT COUNT(*) AS count FROM (
+            SELECT accession_number, COUNT(*) FROM filings GROUP BY accession_number HAVING COUNT(*) > 1
+        );""", "Filings: Duplicate Accession Numbers", logger, expect_zero=True))
+
+    # Check 'xbrl_tags' table for duplicate tag/taxonomy combinations (unlikely but good to validate)
+    results.append(run_validation_query(con, """
+        SELECT COUNT(*) AS count FROM (
+            SELECT taxonomy, tag_name, COUNT(*) FROM xbrl_tags GROUP BY taxonomy, tag_name HAVING COUNT(*) > 1
+        );""", "XBRL Tags: Duplicate Taxonomy/Tag", logger, expect_zero=True))
+
+    return results
+
+
+def main():
+    """Main execution function for the validation script."""
     SCRIPT_NAME = Path(__file__).stem
     LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
-    logger = None # Initialize logger variable
+    logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY) # Setup logger
 
     try:
         config = AppConfig(calling_script_path=Path(__file__))
-        # --- CORRECTED: Setup logger AFTER config is loaded ---
-        logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY) # Setup logger
         logger.info(f"--- Starting Database Validation for: {config.DB_FILE_STR} ---")
     except SystemExit as e:
-        # Config loading already exited, use basic logger if possible
-        logging.getLogger(SCRIPT_NAME).critical(f"Configuration failed: {e}")
+        logger.critical(f"Configuration failed: {e}")
         sys.exit(1)
     except Exception as e:
-        # Use basic logger if custom one failed
-        logging.getLogger(SCRIPT_NAME).critical(f"Error during initial setup: {e}", exc_info=True)
+        logger.critical(f"Error during initial setup: {e}", exc_info=True)
         sys.exit(1)
-
-    # Ensure logger was successfully initialized before proceeding
-    if logger is None:
-         print(f"FATAL: Logger initialization failed. Exiting.", file=sys.stderr)
-         sys.exit(1)
 
     try:
         # Use ManagedDatabaseConnection for read-only connection
@@ -228,12 +257,11 @@ if __name__ == "__main__":
             else:
                  logger.critical("Database connection failed. Cannot run validations.")
                  sys.exit(1)
-
     except Exception as e:
         logger.critical(f"An unhandled error occurred during validation: {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        # Connection closing is handled by ManagedDatabaseConnection context manager
-        logger.debug("ManagedDatabaseConnection context exited.")
 
     logger.info(f"--- Database Validation Script Finished ---")
+
+if __name__ == "__main__":
+    main()

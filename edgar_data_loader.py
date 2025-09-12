@@ -127,7 +127,14 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 parquet_path = config.PARQUET_DIR / table
                 if parquet_path.exists() and any(parquet_path.iterdir()):
                     logger.info(f"Creating new table '{table_new}' from Parquet files...")
-                    db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
+                    if table == "filings":
+                        # Special handling for filings to ensure accession_number is unique
+                        db_conn.execute(f"""
+                            CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
+                                SELECT *, ROW_NUMBER() OVER(PARTITION BY accession_number) as rn FROM read_parquet('{parquet_path}/*.parquet')
+                            ) WHERE rn = 1;""")
+                    else:
+                        db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
                 else:
                     logger.warning(f"Parquet directory for '{table}' not found or empty. Creating empty new table.")
                     db_conn.execute(SCHEMA[table].replace(f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE OR REPLACE TABLE {table_new}"))
