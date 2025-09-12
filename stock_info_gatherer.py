@@ -41,7 +41,7 @@ LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
 logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # --- Constants ---
-DEFAULT_MAX_WORKERS = 10 # Default number of concurrent fetcher processes
+DEFAULT_MAX_WORKERS = 4 # Reduced default to be more respectful of API rate limits
 
 # Define constants for table names, now used for directory names
 YF_INFO_FETCH_ERRORS = "yf_info_fetch_errors"

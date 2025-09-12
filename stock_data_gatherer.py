@@ -44,7 +44,7 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # --- Constants ---
 DEFAULT_REQUEST_DELAY = 0.05 # Default 50ms delay
-DEFAULT_MAX_WORKERS = 10 # Default number of concurrent workers
+DEFAULT_MAX_WORKERS = 4 # Reduced default to be more respectful of API rate limits
 
 # --- Database Functions (Updated to use logger instance) ---
 def get_tickers_to_process(
