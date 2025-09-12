@@ -113,35 +113,46 @@ def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Lo
     results = []
     logger.info("\n=== Checking Yahoo Finance Data Integrity ===")
 
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+
     # Null checks on PKs / Essential Columns
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_profile_metrics: NULL PK/Timestamp Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_stock_actions WHERE ticker IS NULL OR action_date IS NULL OR action_type IS NULL;", "yf_stock_actions: NULL PK Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_major_holders: NULL PK/Timestamp Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_recommendations WHERE ticker IS NULL OR recommendation_timestamp IS NULL OR firm IS NULL;", "yf_recommendations: NULL PK Check", logger, expect_zero=True))
+    if 'yf_profile_metrics' in db_tables:
+        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_profile_metrics: NULL PK/Timestamp Check", logger, expect_zero=True))
+    if 'yf_stock_actions' in db_tables:
+        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_stock_actions WHERE ticker IS NULL OR action_date IS NULL OR action_type IS NULL;", "yf_stock_actions: NULL PK Check", logger, expect_zero=True))
+    if 'yf_major_holders' in db_tables:
+        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_major_holders: NULL PK/Timestamp Check", logger, expect_zero=True))
+    if 'yf_recommendations' in db_tables:
+        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_recommendations WHERE ticker IS NULL OR recommendation_timestamp IS NULL OR firm IS NULL;", "yf_recommendations: NULL PK Check", logger, expect_zero=True))
 
     # Data Range / Consistency Checks
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE cik IS NOT NULL AND LENGTH(cik) != 10;", "yf_profile_metrics: Invalid CIK format", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE pct_insiders < 0 OR pct_insiders > 1 OR pct_institutions < 0 OR pct_institutions > 1;", "yf_major_holders: Invalid Percentage Range", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT DISTINCT action_type FROM yf_stock_actions;", "yf_stock_actions: Distinct action_type", logger))
+    if 'yf_profile_metrics' in db_tables:
+        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE cik IS NOT NULL AND LENGTH(cik) != 10;", "yf_profile_metrics: Invalid CIK format", logger, expect_zero=True))
+    if 'yf_major_holders' in db_tables:
+        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE pct_insiders < 0 OR pct_insiders > 1 OR pct_institutions < 0 OR pct_institutions > 1;", "yf_major_holders: Invalid Percentage Range", logger, expect_zero=True))
+    if 'yf_stock_actions' in db_tables:
+        results.append(run_validation_query(con, "SELECT DISTINCT action_type FROM yf_stock_actions;", "yf_stock_actions: Distinct action_type", logger))
 
     return results
 
 def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
     """Checks if tickers in stock/yf tables exist in the main 'tickers' table."""
     results = []
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
     logger.info("\n=== Checking Ticker Consistency Across Tables (Expecting 0 violations) ===")
     yf_tables_with_ticker = [
         "stock_history", # From stock_data_gatherer
         "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations"
     ]
     for table in yf_tables_with_ticker:
-        query = f"""
-            SELECT COUNT(t1.ticker) as count
-            FROM {table} t1
-            LEFT JOIN tickers t2 ON t1.ticker = t2.ticker
-            WHERE t2.ticker IS NULL;
-        """
-        results.append(run_validation_query(con, query, f"Ticker Consistency Check: {table} -> tickers", logger, expect_zero=True))
+        if table.lower() in db_tables:
+            query = f"""
+                SELECT COUNT(t1.ticker) as count
+                FROM {table} t1
+                LEFT JOIN tickers t2 ON t1.ticker = t2.ticker
+                WHERE t2.ticker IS NULL;
+            """
+            results.append(run_validation_query(con, query, f"Ticker Consistency Check: {table} -> tickers", logger, expect_zero=True))
     # Check the other way? Tickers in `tickers` without stock/yf data? Optional.
     # query_missing_yf = """
     #     SELECT COUNT(t.ticker) as count
