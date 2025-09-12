@@ -301,12 +301,8 @@ def extract_and_sample_zip_archive(
 ) -> Tuple[str, str | None]:
     """Extracts JSON files from a ZIP archive and gets a sample from the first one."""
     logger.info(f"Processing ZIP archive for extraction and sampling: {zip_filepath.name}")
-    
-    # --- Cleanliness Step: Ensure a fresh start for extraction ---
-    if extract_dir.exists():
-        logger.info(f"Cleaning previous extraction data from {extract_dir}...")
-        shutil.rmtree(extract_dir)
-    
+
+    # Ensure the target directory exists. The extraction logic will skip existing files.
     extract_dir.mkdir(parents=True, exist_ok=True)
 
     # Pass max_workers to extraction function

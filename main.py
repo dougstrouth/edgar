@@ -144,7 +144,8 @@ def main():
         ]
         logger.info("Running full pipeline...")
         for step_name in pipeline_steps:
-            script_args = ['--json'] if step_name == "cleanup" else None
+            # For the cleanup step in an 'all' run, pass the '--all' flag to remove both JSON and Parquet
+            script_args = ['--all'] if step_name == "cleanup" else None
             if not run_script(step_name, script_args=script_args):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
                 sys.exit(1)
