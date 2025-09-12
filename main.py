@@ -60,6 +60,8 @@ SCRIPTS = {
     "load": SCRIPT_DIR / "edgar_data_loader.py", # This now loads from Parquet
     "gather_stocks": SCRIPT_DIR / "stock_data_gatherer.py",
     "gather_info": SCRIPT_DIR / "stock_info_gatherer.py",
+    "load_stocks": SCRIPT_DIR / "load_supplementary_data.py",
+    "load_info": SCRIPT_DIR / "load_supplementary_data.py",
     "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
@@ -135,7 +137,7 @@ def main():
     if args.step == "all":
         # Run cleanup at the end to free up space
         pipeline_steps = [
-            "fetch", "parse-to-parquet", "load",
+            "fetch", "parse_to_parquet", "load",
             # "gather_stocks",  # Temporarily disabled due to yfinance rate-limiting
             # "gather_info",    # Temporarily disabled due to yfinance rate-limiting
             # "gather_macro",   # Temporarily disabled
