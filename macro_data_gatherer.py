@@ -101,6 +101,8 @@ def run_macro_data_pipeline(config: AppConfig):
         logger.warning("No data was fetched. Exiting without creating Parquet file.")
     else:
         final_df = pd.concat(all_series_data, ignore_index=True)
+        # Reorder columns to match the table schema for correct positional loading
+        final_df = final_df[['series_id', 'date', 'value']]
         final_df = parquet_converter._prepare_df_for_storage(
             final_df,
             str_cols=['series_id'],

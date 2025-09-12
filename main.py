@@ -162,9 +162,18 @@ def main():
         logger.info("Full pipeline completed successfully!")
     else:
         # Map CLI argument to script key
-        script_key = args.step.replace("-", "_")
-        # Pass any remaining arguments to the script
-        if not run_script(script_key, script_args=remaining_args):
+        script_key = args.step
+
+        # Prepare arguments for specific loader scripts that require a source
+        final_args = remaining_args
+        if script_key == "load_macro":
+            final_args = ["macro_economic_data"] + remaining_args
+        elif script_key == "load_stocks":
+            final_args = ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers"] + remaining_args
+        elif script_key == "load_info":
+            final_args = ["all_yf"] + remaining_args
+
+        if not run_script(script_key, script_args=final_args):
             sys.exit(1)
 
 if __name__ == "__main__":
