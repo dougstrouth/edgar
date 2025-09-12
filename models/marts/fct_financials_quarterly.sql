@@ -35,8 +35,8 @@ quarterly_facts as (
 pivoted as (
     -- Pivot the data to turn tags into columns
     {{ dbt.pivot(
-        column_to_pivot='tag_name',
-        list_of_pivot_values=[
+        column='tag_name',
+        values=[
             'Assets',
             'Liabilities',
             'StockholdersEquity',

@@ -1,0 +1,26 @@
+# Core Data and Web
+requests>=2.32.3
+duckdb>=1.2.2
+pandas>=2.2.3
+pyarrow>=19.0.1
+lxml>=6.0.1
+
+# dbt Transformation
+dbt-duckdb==1.9.6
+dbt-core<1.10.0 # Constrain to be compatible with dbt-duckdb 1.9.6
+
+# Supplementary Data Gatherers
+yfinance>=0.2.55
+pandas-datareader>=0.10.0
+fredapi>=0.5.2
+sec-cik-mapper>=2.1.0
+
+# Utilities
+python-dotenv>=1.1.0
+tqdm>=4.67.1
+tabulate>=0.9.0
+
+# Notebook & Plotting
+ipykernel>=6.29.5
+nbformat>=5.10.4
+plotly>=6.0.1
