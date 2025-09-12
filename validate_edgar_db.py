@@ -181,22 +181,34 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     # all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
 
     # --- Summarize Results ---
-    logger.info("n=== Validation Summary ===")
-    issues_found = [res for res in all_results if res[0]] # Check if the 'is_issue' flag is True
-    warnings_found = [res for res in all_results if res[1] is not None and res[2].startswith("THRESHOLD Check") and res[0]]
-    missing_tables = [res for res in all_results if res[2].startswith("Missing Table Check")]
+    logger.info("\n=== Validation Summary ===")
+    
+    # Separate issues into categories
+    hard_failures = [res for res in all_results if res[0] and not res[2].startswith("THRESHOLD Check") and not res[2].startswith("Missing Table Check")]
+    warnings_found = [res for res in all_results if res[0] and res[2].startswith("THRESHOLD Check")]
+    missing_tables = [res for res in all_results if res[0] and res[2].startswith("Missing Table Check")]
 
+    # Report missing tables first as they are critical
     if missing_tables:
          logger.error(f"{len(missing_tables)} Expected Table(s) MISSING:")
          for _, _, desc in missing_tables: logger.error(f"  - {desc}")
-    if issues_found:
-        num_failed_checks = len([res for res in issues_found if not res[2].startswith("THRESHOLD Check") and not res[2].startswith("Missing Table Check")])
-        num_warnings = len(warnings_found)
-        if num_failed_checks > 0: logger.error(f"{num_failed_checks} Validation Check(s) FAILED (Expected 0 count or Error).")
-        if num_warnings > 0: logger.warning(f"{num_warnings} Validation Warning(s) (Threshold Exceeded).")
-        logger.error("Review logs above for details on failed checks/warnings.")
+    
+    # Report hard failures
+    if hard_failures:
+        logger.error(f"{len(hard_failures)} Validation Check(s) FAILED (Expected 0 count or Error).")
+    
+    # Report warnings
+    if warnings_found:
+        logger.warning(f"{len(warnings_found)} Validation Warning(s) (Threshold Exceeded).")
+
+    # Final summary message
+    if not hard_failures and not missing_tables:
+        if warnings_found:
+            logger.warning("Validation passed with warnings. Review logs above for details.")
+        else:
+            logger.info("All validation checks passed successfully!")
     else:
-        logger.info("All specific validation checks passed successfully!")
+        logger.error("Validation finished with errors. Review logs above for details.")
 
 def check_table_uniqueness(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
     """
