@@ -10,7 +10,7 @@ intermediate Parquet files. This helps manage disk space.
 import sys
 import shutil
 import argparse
-import logging
+import logging, glob
 from pathlib import Path
 
 # --- Import Utilities ---
@@ -29,11 +29,28 @@ def remove_directory(dir_path: Path, logger: logging.Logger):
     else:
         logger.warning(f"Directory not found, skipping removal: {dir_path}")
 
+def remove_glob_patterns(root_dir: Path, patterns: list[str], logger: logging.Logger):
+    """Safely removes directories and files matching glob patterns in the root directory."""
+    for pattern in patterns:
+        logger.info(f"Searching for items matching '{pattern}' in {root_dir}...")
+        # Use glob.glob to handle this more robustly
+        for path_str in glob.glob(str(root_dir / pattern)):
+            path_to_remove = Path(path_str)
+            if path_to_remove.is_dir():
+                remove_directory(path_to_remove, logger)
+            elif path_to_remove.is_file():
+                try:
+                    path_to_remove.unlink()
+                    logger.info(f"Successfully removed file {path_to_remove}")
+                except OSError as e:
+                    logger.error(f"Error removing file {path_to_remove}: {e}", exc_info=True)
+
 def main():
     """Main function to parse arguments and perform cleanup."""
     parser = argparse.ArgumentParser(description="Clean up intermediate data artifacts.")
     parser.add_argument("--json", action="store_true", help="Remove the extracted_json directory.")
     parser.add_argument("--parquet", action="store_true", help="Remove the parquet_data directory.")
+    parser.add_argument("--cache", action="store_true", help="Remove temporary cache directories (e.g., .yfinance_cache_*, .mypy_cache, .cache).")
     parser.add_argument("--all", action="store_true", help="Remove all intermediate artifact directories (json and parquet).")
 
     args = parser.parse_args()
@@ -51,7 +68,7 @@ def main():
     logger.info("--- Starting Artifact Cleanup ---")
 
     if not any([args.json, args.parquet, args.all]):
-        logger.warning("No cleanup target specified. Use --json, --parquet, or --all. Exiting.")
+        logger.warning("No cleanup target specified. Use --json, --parquet, --cache, or --all. Exiting.")
         sys.exit(0)
 
     if args.json or args.all:
@@ -59,6 +76,11 @@ def main():
 
     if args.parquet or args.all:
         remove_directory(config.PARQUET_DIR, logger)
+
+    if args.cache:
+        # Remove the new centralized cache and any old lingering ones
+        patterns_to_remove = [".cache", ".mypy_cache", ".yfinance_cache_*"]
+        remove_glob_patterns(Path.cwd(), patterns_to_remove, logger)
 
     logger.info("--- Artifact Cleanup Finished ---")
 
