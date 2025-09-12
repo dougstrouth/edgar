@@ -102,7 +102,7 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
     # Define PRAGMA settings for write-heavy operations
     write_pragmas = {
         'threads': os.cpu_count(),
-        'memory_limit': "'4GB'"  # Use quotes for string values in PRAGMA
+        'memory_limit': '4GB'  # The connection utility handles quoting
     }
 
     try:

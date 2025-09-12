@@ -372,7 +372,7 @@ def run_stock_data_pipeline(
             'memory_limit': '4GB'
         }
         if config.DUCKDB_TEMP_DIR:
-            write_pragmas['temp_directory'] = f"'{config.DUCKDB_TEMP_DIR}'"
+            write_pragmas['temp_directory'] = config.DUCKDB_TEMP_DIR
 
         # --- Cleanliness Step for Parquet directories ---
         if mode == 'full_refresh':
