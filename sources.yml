@@ -1,11 +1,13 @@
 version: 2
 
 sources:
-  - name: edgar_source
-    # For dbt_duckdb, the database is the file itself.
-    # The schema is 'main' by default in DuckDB.
-    schema: main 
+  - name: edgar_raw # This name is arbitrary, but should be descriptive
+    # This tells dbt to look in your 'dev' target database (from profiles.yml)
+    database: '{{ target.database }}' 
+    schema: main # DuckDB's default schema
     tables:
+      - name: companies
+      - name: filings
       - name: xbrl_facts
-      - name: macro_economic_data
-      - name: market_risk_factors
+      - name: tickers
+      # Add other raw tables here as you need them (e.g., yf_income_statement)

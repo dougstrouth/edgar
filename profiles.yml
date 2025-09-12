@@ -1,10 +1,14 @@
-# This file contains the connection details for your dbt project.
-# It is configured to read the database path from your .env file.
+# For more information on configuring profiles, please see:
+# https://docs.getdbt.com/docs/core/connect-data-platform/profiles.yml
 
+# This profile is configured to be used by the main.py orchestrator.
+# The `dbt` command in main.py sets the DBT_PROFILES_DIR to the project root.
 edgar_analytics:
   target: dev
   outputs:
     dev:
       type: duckdb
-      path: "{{ env_var('DB_FILE') }}"
-      threads: 4 # Adjust based on your machine's core count
+      path: 'C:/Users/user/Documents/Code/edgar/data/edgar_data.db' # IMPORTANT: Replace with the actual path from your .env file
+      # Add any extensions you use, e.g.:
+      # extensions:
+      #   - "httpfs"

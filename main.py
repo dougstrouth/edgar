@@ -26,6 +26,7 @@ edgar_data_loader.py, etc.) are in the same directory.
 
 import argparse
 import sys
+import os
 import logging
 import runpy
 from pathlib import Path
@@ -128,17 +129,19 @@ def run_dbt_command(args: Optional[List[str]] = None) -> bool:
     if not args:
         args = ["run"] # Default command is 'run'
 
-    # Add the --profiles-dir flag to make the dbt project self-contained
-    dbt_args = ["--profiles-dir", "."] + args
+    # Set the DBT_PROFILES_DIR environment variable to make the project self-contained.
+    # This is a more robust way than passing CLI flags programmatically.
+    original_profiles_dir = os.environ.get('DBT_PROFILES_DIR')
+    os.environ['DBT_PROFILES_DIR'] = '.'
 
-    logger.info(f"---===[ Running Step: DBT with args: {dbt_args} ]===---")
+    logger.info(f"---===[ Running Step: DBT with args: {args} ]===---")
     start_time = time.time()
     try:
         # Import dbt only when needed
         from dbt.cli.main import dbtRunner, dbtRunnerResult
 
         dbt = dbtRunner()
-        res: dbtRunnerResult = dbt.invoke(dbt_args)
+        res: dbtRunnerResult = dbt.invoke(args)
 
         end_time = time.time()
         if res.success:
@@ -154,6 +157,12 @@ def run_dbt_command(args: Optional[List[str]] = None) -> bool:
         end_time = time.time()
         logger.critical(f"---===[ Step 'DBT' FAILED with an unhandled exception in {end_time - start_time:.2f}s ]===---", exc_info=True)
         return False
+    finally:
+        # Restore the original environment variable to avoid side effects
+        if original_profiles_dir is None:
+            del os.environ['DBT_PROFILES_DIR']
+        else:
+            os.environ['DBT_PROFILES_DIR'] = original_profiles_dir
 
 def main():
     """Parses command-line arguments and runs the requested pipeline steps."""

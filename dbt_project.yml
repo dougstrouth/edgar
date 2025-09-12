@@ -1,4 +1,6 @@
 # This file configures your dbt project.
+# For a full list of options, see the dbt documentation:
+# https://docs.getdbt.com/reference/dbt_project-yml
 
 name: 'edgar_analytics'
 version: '1.0.0'
@@ -7,7 +9,7 @@ config-version: 2
 # This setting configures which "profile" dbt uses for this project.
 profile: 'edgar_analytics'
 
-# These configurations apply to all models in your project.
+# These configurations apply to all models in the project.
 model-paths: ["models"]
 analysis-paths: ["analyses"]
 test-paths: ["tests"]
@@ -15,7 +17,6 @@ seed-paths: ["seeds"]
 macro-paths: ["macros"]
 snapshot-paths: ["snapshots"]
 
-target-path: "target"  # directory which will store compiled SQL and logs
 clean-targets:         # directories to be removed by `dbt clean`
   - "target"
   - "dbt_packages"
