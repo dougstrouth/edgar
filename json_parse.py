@@ -26,13 +26,10 @@ from typing import Dict, List, Any, Optional, Union, Tuple,Set # Added Tuple
 from datetime import datetime, date, timezone
 
 # --- Import Utilities ---
-from logging_utils import setup_logging
 # config_utils is imported only in the __main__ block for example usage
 
 # --- Setup Logging ---
-SCRIPT_NAME = Path(__file__).stem
-LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
-logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
+logger = logging.getLogger(__name__) # Get logger instance
 
 # --- Constants (Removed paths derived from .env) ---
 # API URL templates remain useful

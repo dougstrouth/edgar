@@ -14,13 +14,10 @@ import pandas as pd
 from typing import List, Optional, Dict, Any, Tuple, Union
 
 # --- Import Utilities ---
-from logging_utils import setup_logging
 from database_conn import get_db_connection
 
 # --- Setup Logging ---
-SCRIPT_NAME = Path(__file__).stem
-LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
-logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class AnalysisClient:
     """
