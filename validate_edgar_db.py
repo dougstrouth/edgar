@@ -37,8 +37,9 @@ EDGAR_TABLES = ["companies", "tickers", "former_names", "filings", "xbrl_tags", 
 STOCK_TABLES = ["stock_history", "stock_fetch_errors"]
 # Tables loaded by stock_info_gatherer.py
 YF_INFO_TABLES = [
-    "yf_profile_metrics", "yf_stock_actions", "yf_major_holders",
-    "yf_recommendations", "yf_info_fetch_errors"
+    "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations",
+    "yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet",
+    "yf_cash_flow"
 ]
 ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + YF_INFO_TABLES
 
@@ -118,6 +119,9 @@ def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Lo
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_stock_actions WHERE ticker IS NULL OR action_date IS NULL OR action_type IS NULL;", "yf_stock_actions: NULL PK Check", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_major_holders: NULL PK/Timestamp Check", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_recommendations WHERE ticker IS NULL OR recommendation_timestamp IS NULL OR firm IS NULL;", "yf_recommendations: NULL PK Check", logger, expect_zero=True))
+    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_income_statement WHERE ticker IS NULL OR report_date IS NULL OR item_name IS NULL;", "yf_income_statement: NULL PK Check", logger, expect_zero=True))
+    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_balance_sheet WHERE ticker IS NULL OR report_date IS NULL OR item_name IS NULL;", "yf_balance_sheet: NULL PK Check", logger, expect_zero=True))
+    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_cash_flow WHERE ticker IS NULL OR report_date IS NULL OR item_name IS NULL;", "yf_cash_flow: NULL PK Check", logger, expect_zero=True))
 
     # Data Range / Consistency Checks
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE cik IS NOT NULL AND LENGTH(cik) != 10;", "yf_profile_metrics: Invalid CIK format", logger, expect_zero=True))
@@ -132,7 +136,8 @@ def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Log
     logger.info("\n=== Checking Ticker Consistency Across Tables (Expecting 0 violations) ===")
     yf_tables_with_ticker = [
         "stock_history", # From stock_data_gatherer
-        "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations"
+        "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations",
+        "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"
     ]
     for table in yf_tables_with_ticker:
         query = f"""

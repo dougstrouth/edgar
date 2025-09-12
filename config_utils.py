@@ -32,6 +32,7 @@ class AppConfig:
         DB_FILE (Path): Resolved path to the DuckDB database file.
         DB_FILE_STR (str): String representation of the DB_FILE path.
         EXTRACT_BASE_DIR (Path): Resolved path to the base for extracted files.
+        DUCKDB_TEMP_DIR (Optional[str]): Path for DuckDB's temporary files.
         SEC_USER_AGENT (str): The User-Agent string for SEC API requests.
         PARQUET_DIR (Path): Resolved path for intermediate Parquet files.
         SUBMISSIONS_DIR (Path): Resolved path to extracted submissions.
@@ -105,6 +106,9 @@ class AppConfig:
             config_logger.info(f"  DOWNLOAD_DIR: {self.DOWNLOAD_DIR}")
             config_logger.info(f"  PARQUET_DIR: {self.PARQUET_DIR}")
             config_logger.info(f"  DB_FILE: {self.DB_FILE}")
+
+            # Load optional performance tuning vars
+            self.DUCKDB_TEMP_DIR: Optional[str] = self.get_optional_var("DUCKDB_TEMP_DIR")
 
             # Validate the User-Agent
             if "PersonalResearchProject" in self.SEC_USER_AGENT or "your.email@example.com" in self.SEC_USER_AGENT:

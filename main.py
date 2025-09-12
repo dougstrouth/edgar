@@ -30,6 +30,7 @@ import logging
 import runpy
 from pathlib import Path
 import time
+from typing import Optional, List
 
 # Ensure utility modules can be found. This is generally good practice,
 # especially if the script is run from a different working directory.
@@ -37,8 +38,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 
 try:
     # These are for the orchestrator's own logging and config awareness.
-    # The individual scripts will load their own instances when run.
-    from config_utils import AppConfig
+    # The individual scripts will load their own config instances when run.
     from logging_utils import setup_logging
 except ImportError as e:
     print(f"FATAL: Could not import utility modules. Make sure they are in the same directory or Python path: {e}", file=sys.stderr)
@@ -121,14 +121,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    # Load config to log paths, though individual scripts will load it too.
-    try:
-        config = AppConfig(calling_script_path=Path(__file__))
-        logger.info(f"Orchestrator configured. DB target: {config.DB_FILE_STR}")
-    except SystemExit:
-        logger.critical("Configuration failed. Check .env file. Exiting orchestrator.")
-        sys.exit(1)
 
     if args.step == "all":
         # Run cleanup at the end to free up space

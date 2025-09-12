@@ -26,8 +26,6 @@ from typing import Optional, Dict, List, Set, Tuple
 import duckdb
 import pandas as pd
 import yfinance as yf
-from sec_cik_mapper import StockMapper
-# from dotenv import load_dotenv # No longer needed here
 from tqdm import tqdm
 
 # --- Import Utilities ---
@@ -332,8 +330,16 @@ def run_stock_data_pipeline(
     fetch_errors_count = 0; load_errors_count = 0; total_tickers_to_process = 0
 
     try:
+        # Define PRAGMA settings for write-heavy operations
+        write_pragmas = {
+            'threads': os.cpu_count(),
+            'memory_limit': '4GB'
+        }
+        if config.DUCKDB_TEMP_DIR:
+            write_pragmas['temp_directory'] = f"'{config.DUCKDB_TEMP_DIR}'"
+
         # Use context manager with override or config default path
-        with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False) as write_conn:
+        with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False, pragma_settings=write_pragmas) as write_conn:
             if not write_conn:
                 logger.critical("Exiting due to database connection failure.")
                 return # Cannot proceed without connection

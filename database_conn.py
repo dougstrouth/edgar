@@ -86,8 +86,10 @@ def get_db_connection(
         if conn and pragma_settings:
             for key, value in pragma_settings.items():
                 try:
-                    # Use proper formatting for string values
-                    if isinstance(value, str):
+                    # Let the caller provide quotes if a value must be a string literal.
+                    # This is more flexible for settings like temp_directory.
+                    # The most common string-based PRAGMA is memory_limit, which works this way.
+                    if isinstance(value, str) and not value.startswith("'"):
                         conn.execute(f"PRAGMA {key} = '{value}';")
                     else:
                         conn.execute(f"PRAGMA {key} = {value};")

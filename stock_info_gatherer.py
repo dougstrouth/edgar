@@ -361,8 +361,16 @@ def run_info_gathering_pipeline(config: AppConfig):
     logger.info(f"Using up to {max_workers} concurrent workers.")
     logger.info(f"Request Delay: {request_delay}s")
 
+    # Define PRAGMA settings for write-heavy operations
+    write_pragmas = {
+        'threads': os.cpu_count(),
+        'memory_limit': '4GB'
+    }
+    if config.DUCKDB_TEMP_DIR:
+        write_pragmas['temp_directory'] = f"'{config.DUCKDB_TEMP_DIR}'"
+
     try:
-        with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=False) as con:
+        with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=False, pragma_settings=write_pragmas) as con:
             if not con:
                 logger.critical("Database connection failed. Exiting.")
                 return

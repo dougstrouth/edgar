@@ -97,13 +97,52 @@ SCHEMA = {
     ]
 }
 
+def _get_columns_from_create_sql(create_sql: str) -> List[str]:
+    """Parses a CREATE TABLE SQL statement to extract column names."""
+    try:
+        # Get the content between the first '(' and the last ')'
+        content = create_sql[create_sql.find('(') + 1 : create_sql.rfind(')')]
+
+        # 1. Remove SQL comments (--) before any other processing
+        lines = content.splitlines()
+        cleaned_lines = []
+        for line in lines:
+            comment_pos = line.find('--')
+            if comment_pos != -1:
+                line = line[:comment_pos]
+            cleaned_lines.append(line.strip())
+        content = " ".join(cleaned_lines)
+        
+        # 2. Find and remove constraint clauses (like PRIMARY KEY)
+        pk_pos = content.upper().find('PRIMARY KEY'); fk_pos = content.upper().find('FOREIGN KEY'); constraint_pos = content.upper().find('CONSTRAINT')
+        positions = [p for p in [pk_pos, fk_pos, constraint_pos] if p != -1]
+        first_constraint_pos = min(positions) if positions else -1
+
+        if first_constraint_pos != -1:
+            last_comma_before_constraint = content.rfind(',', 0, first_constraint_pos)
+            if last_comma_before_constraint != -1:
+                content = content[:last_comma_before_constraint]
+
+        # 3. Now, split the fully cleaned content by comma
+        cols_with_types = [part.strip() for part in content.split(',') if part.strip()]
+
+        # 4. Extract the column name, ignoring any that have a DEFAULT clause
+        col_names = [part.split()[0].strip('`"') for part in cols_with_types if 'DEFAULT' not in part.upper()]
+        return col_names
+    except Exception as e:
+        logger.error(f"Could not parse columns from SQL: {e}\nSQL: {create_sql}")
+        return []
+
 def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
     """Loads data from Parquet files into the DuckDB database."""
     # Define PRAGMA settings for write-heavy operations
     write_pragmas = {
         'threads': os.cpu_count(),
-        'memory_limit': "'4GB'"  # Use quotes for string values in PRAGMA
+        'memory_limit': '4GB',  # The connection utility will add the quotes
+        'preserve_insertion_order': 'false'
     }
+    if config.DUCKDB_TEMP_DIR:
+        write_pragmas['temp_directory'] = f"'{config.DUCKDB_TEMP_DIR}'"
 
     try:
         with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=False, pragma_settings=write_pragmas) as db_conn:
@@ -127,7 +166,10 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 parquet_path = config.PARQUET_DIR / table
                 if parquet_path.exists() and any(parquet_path.iterdir()):
                     logger.info(f"Creating new table '{table_new}' from Parquet files...")
-                    db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
+                    # Explicitly list columns to avoid SELECT *
+                    cols = _get_columns_from_create_sql(SCHEMA[table])
+                    col_str = ", ".join([f'"{c}"' for c in cols])
+                    db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT {col_str} FROM read_parquet('{parquet_path}/*.parquet');")
                 else:
                     logger.warning(f"Parquet directory for '{table}' not found or empty. Creating empty new table.")
                     db_conn.execute(SCHEMA[table].replace(f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE OR REPLACE TABLE {table_new}"))
@@ -137,21 +179,23 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
             if facts_parquet_path.exists() and any(facts_parquet_path.iterdir()):
                 logger.info("Processing and loading xbrl_facts...")
                 # Create the new valid facts table by joining with the new filings table
+                fact_cols = _get_columns_from_create_sql(SCHEMA["xbrl_facts"])
+                fact_col_str = ", ".join([f'p."{c}"' for c in fact_cols])
                 logger.info("Creating new table 'xbrl_facts_new'...")
                 db_conn.execute("""
                     CREATE OR REPLACE TABLE xbrl_facts_new AS
-                    SELECT p.* FROM read_parquet('{0}/*.parquet') p
+                    SELECT {1} FROM read_parquet('{0}/*.parquet') p
                     JOIN filings_new f ON p.accession_number = f.accession_number;
-                """.format(facts_parquet_path))
+                """.format(facts_parquet_path, fact_col_str))
 
                 # Create the new orphaned facts table
                 logger.info("Creating new table 'xbrl_facts_orphaned_new'...")
                 db_conn.execute("""
                     CREATE OR REPLACE TABLE xbrl_facts_orphaned_new AS
-                    SELECT p.* FROM read_parquet('{0}/*.parquet') p
+                    SELECT {1} FROM read_parquet('{0}/*.parquet') p
                     LEFT JOIN filings_new f ON p.accession_number = f.accession_number
                     WHERE f.accession_number IS NULL;
-                """.format(facts_parquet_path))
+                """.format(facts_parquet_path, fact_col_str))
             else:
                 logger.warning("Parquet directory for 'xbrl_facts' not found. Creating empty new fact tables.")
                 db_conn.execute(SCHEMA["xbrl_facts"].replace("CREATE TABLE IF NOT EXISTS xbrl_facts", "CREATE OR REPLACE TABLE xbrl_facts_new"))
@@ -161,9 +205,21 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
             logger.info("--- Starting Atomic Table Swap ---")
             db_conn.begin()
             try:
-                all_load_tables = main_tables + ["xbrl_facts", "xbrl_facts_orphaned"]
-                for table in all_load_tables:
+                # Define the order for dropping tables to respect dependencies.
+                # Tables that reference others (child tables) must be dropped before
+                # the tables they reference (parent tables).
+                swap_order = [
+                    "xbrl_facts",           # References filings, companies, xbrl_tags
+                    "tickers",              # References companies
+                    "former_names",         # References companies
+                    "filings",              # References companies
+                    "companies",            # Referenced by many; drop after children
+                    "xbrl_tags",            # Referenced by xbrl_facts; drop after children
+                    "xbrl_facts_orphaned"   # No dependencies
+                ]
+                for table in swap_order:
                     logger.info(f"Swapping table: {table}")
+                    # The _new table was created successfully; now drop the old one and rename the new one.
                     db_conn.execute(f"DROP TABLE IF EXISTS {table};")
                     db_conn.execute(f"ALTER TABLE {table}_new RENAME TO {table};")
                 db_conn.commit()
@@ -181,57 +237,6 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                     db_conn.execute(index_sql)
                 except Exception as index_e:
                     logger.error(f"Failed to create index: {index_sql}. Error: {index_e}")
-            logger.info("Indexes created successfully.")
-
-    except ConnectionError as e:
-        logger.critical(f"Database Connection Error: {e}. Cannot continue load.")
-        raise # Re-raise to stop processing
-    except Exception as e:
-        logger.error(f"Critical error during Parquet load process: {e}", exc_info=True)
-        raise # Re-raise to stop processing
-
-if __name__ == "__main__":
-    try:
-        config = AppConfig(calling_script_path=Path(__file__))
-    except SystemExit as e:
-        logging.getLogger().critical(f"Configuration failed: {e}")
-        sys.exit(1)
-
-    SCRIPT_NAME = Path(__file__).stem
-    LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
-    logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
-
-    logger.info(f"--- Starting EDGAR Data Loader Script ---")
-    logger.info(f"Using DB_FILE: {config.DB_FILE}")
-    logger.info(f"Parquet source directory: {config.PARQUET_DIR}")
-
-    load_parquet_to_db(config, logger)
-
-    # --- Final Script Message ---
-    logger.info(f"--- EDGAR Data Loader Script Finished ---")
-                """)
-
-                # Insert orphaned facts
-                logger.info("Loading orphaned facts into 'xbrl_facts_orphaned'...")
-                db_conn.execute("""
-                    INSERT OR REPLACE INTO xbrl_facts_orphaned
-                    SELECT p.* FROM facts_parquet p
-                    LEFT JOIN valid_accns v ON p.accession_number = v.accession_number
-                    WHERE v.accession_number IS NULL;
-                """)
-
-                db_conn.unregister('valid_accns')
-            else:
-                logger.warning("Parquet directory not found or empty for 'xbrl_facts', skipping.")
-
-            db_conn.commit()
-            logger.info("--- Parquet to Database Load Complete ---")
-
-            # --- Create Indexes ---
-            logger.info("Creating indexes (may take time)...")
-            for index_sql in SCHEMA["indexes"]:
-                logger.debug(f"Executing: {index_sql}")
-                db_conn.execute(index_sql)
             logger.info("Indexes created successfully.")
 
     except ConnectionError as e:
