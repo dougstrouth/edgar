@@ -63,6 +63,7 @@ SCRIPTS = {
     "load_stocks": SCRIPT_DIR / "load_supplementary_data.py",
     "load_info": SCRIPT_DIR / "load_supplementary_data.py",
     "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
+    "feature_eng": SCRIPT_DIR / "feature_engineering.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
 }
@@ -120,11 +121,11 @@ def main():
         "step",
         nargs="?",
         default="all",
-        choices=["all", "fetch", "parse-to-parquet", "load", "validate", "cleanup"],
+        choices=["all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng"],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
 
-    args = parser.parse_args()
+    args, remaining_args = parser.parse_known_args()
 
     # Load config to log paths, though individual scripts will load it too.
     try:
@@ -141,13 +142,14 @@ def main():
             # "gather_stocks",  # Temporarily disabled due to yfinance rate-limiting
             # "gather_info",    # Temporarily disabled due to yfinance rate-limiting
             # "gather_macro",   # Temporarily disabled
+            "feature_eng",
             "validate",
             "cleanup"
         ]
         logger.info("Running full pipeline...")
         for step_name in pipeline_steps:
             # For the cleanup step in an 'all' run, pass the '--all' flag to remove both JSON and Parquet
-            script_args = ['--all'] if step_name == "cleanup" else None
+            script_args = ['--all', '--cache'] if step_name == "cleanup" else None
             if not run_script(step_name, script_args=script_args):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
                 sys.exit(1)
@@ -155,7 +157,8 @@ def main():
     else:
         # Map CLI argument to script key
         script_key = args.step.replace("-", "_")
-        if not run_script(script_key):
+        # Pass any remaining arguments to the script
+        if not run_script(script_key, script_args=remaining_args):
             sys.exit(1)
 
 if __name__ == "__main__":

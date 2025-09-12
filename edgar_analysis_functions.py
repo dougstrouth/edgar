@@ -88,6 +88,40 @@ class AnalysisClient:
             logger.error(f"Error querying CIK for {identifier}: {e}", exc_info=True)
             return None
 
+    def get_financial_facts(self, cik: str, tags: List[str], forms: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Retrieves specific financial facts for a given CIK.
+
+        Args:
+            cik: The CIK of the company.
+            tags: A list of US-GAAP tag names to retrieve.
+            forms: An optional list of form types to include (e.g., ['10-K', '10-Q']).
+
+        Returns:
+            A pandas DataFrame containing the requested facts.
+        """
+        if not self.conn:
+            logger.error("No database connection available."); return pd.DataFrame()
+        if not isinstance(tags, list) or not tags:
+            logger.error("Tags list cannot be empty."); return pd.DataFrame()
+
+        params = [cik] + tags
+        form_clause = ""
+        if forms and isinstance(forms, list):
+            form_clause = f"AND f.form IN ({','.join('?' * len(forms))})"
+            params.extend(forms)
+
+        query = f"""
+            SELECT f.cik, f.form, f.filed_date, f.period_end_date, f.fp, f.tag_name, f.value_numeric, f.unit
+            FROM xbrl_facts f
+            WHERE f.cik = ? AND f.tag_name IN ({','.join('?' * len(tags))}) {form_clause}
+            ORDER BY f.period_end_date ASC, f.filed_date ASC;
+        """
+
+        logger.info(f"Querying financial facts for CIK {cik}, Tags: {tags}")
+        df = self.conn.execute(query, params).fetchdf()
+        return df
+
     def get_cash_flow_data(self, cik: str, tags: List[str], forms: List[str] = ['10-K', '10-Q']) -> pd.DataFrame:
         """
         Retrieves cash flow related facts for a specific CIK, set of tags, and form types.

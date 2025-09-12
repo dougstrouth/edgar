@@ -59,6 +59,24 @@
             "justMyCode": true
         },
         {
+            "name": "Debug CLI: cleanup",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["cleanup", "--all", "--cache"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug CLI: feature-eng",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["feature-eng"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
             "name": "--- (Individual Scripts Below) ---",
             "type": "python",
             "request": "launch",

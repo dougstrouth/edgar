@@ -30,6 +30,7 @@ class AppConfig:
     Attributes:
         DOWNLOAD_DIR (Path): Resolved path to the main download directory.
         DB_FILE (Path): Resolved path to the DuckDB database file.
+        PROJECT_ROOT (Path): Resolved path to the project's root directory.
         DB_FILE_STR (str): String representation of the DB_FILE path.
         EXTRACT_BASE_DIR (Path): Resolved path to the base for extracted files.
         SEC_USER_AGENT (str): The User-Agent string for SEC API requests.
@@ -51,12 +52,14 @@ class AppConfig:
         """
         self.env_file_path: Optional[Path] = None
         if calling_script_path:
-            script_dir = calling_script_path.resolve().parent
-            self.env_file_path = script_dir / '.env'
+            self.PROJECT_ROOT = calling_script_path.resolve().parent
+            self.env_file_path = self.PROJECT_ROOT / '.env'
             if not self.env_file_path.is_file():
                 # Try parent directory as a fallback
-                parent_env_path = script_dir.parent / '.env'
+                parent_env_path = self.PROJECT_ROOT.parent / '.env'
                 if parent_env_path.is_file():
+                    # If .env is in parent, assume parent is project root
+                    self.PROJECT_ROOT = self.PROJECT_ROOT.parent
                     self.env_file_path = parent_env_path
                 else:
                     config_logger.warning(f".env file not found in {script_dir} or {script_dir.parent}")
@@ -64,11 +67,13 @@ class AppConfig:
         else:
             # If no script path given, check CWD then parent
             cwd = Path.cwd()
+            self.PROJECT_ROOT = cwd
             self.env_file_path = cwd / '.env'
             if not self.env_file_path.is_file():
                  parent_env_path = cwd.parent / '.env'
                  if parent_env_path.is_file():
                       self.env_file_path = parent_env_path
+                      self.PROJECT_ROOT = cwd.parent
                  else:
                       config_logger.warning(f".env file not found in {cwd} or {cwd.parent}")
                       self.env_file_path = None

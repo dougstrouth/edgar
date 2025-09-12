@@ -80,7 +80,7 @@ def main():
     if args.cache:
         # Remove the new centralized cache and any old lingering ones
         patterns_to_remove = [".cache", ".mypy_cache", ".yfinance_cache_*"]
-        remove_glob_patterns(Path.cwd(), patterns_to_remove, logger)
+        remove_glob_patterns(config.PROJECT_ROOT, patterns_to_remove, logger)
 
     logger.info("--- Artifact Cleanup Finished ---")
 
