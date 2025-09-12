@@ -32,6 +32,8 @@ class AppConfig:
         DB_FILE (Path): Resolved path to the DuckDB database file.
         DB_FILE_STR (str): String representation of the DB_FILE path.
         EXTRACT_BASE_DIR (Path): Resolved path to the base for extracted files.
+        SEC_USER_AGENT (str): The User-Agent string for SEC API requests.
+        PARQUET_DIR (Path): Resolved path for intermediate Parquet files.
         SUBMISSIONS_DIR (Path): Resolved path to extracted submissions.
         COMPANYFACTS_DIR (Path): Resolved path to extracted companyfacts.
         TICKER_FILE_PATH (Path): Resolved path to the company_tickers.json file.
@@ -82,6 +84,7 @@ class AppConfig:
         try:
             download_dir_str = os.environ['DOWNLOAD_DIR']
             db_file_str = os.environ['DB_FILE']
+            self.SEC_USER_AGENT: str = os.environ['SEC_USER_AGENT']
 
             self.DOWNLOAD_DIR: Path = Path(download_dir_str).resolve()
             self.DB_FILE: Path = Path(db_file_str).resolve()
@@ -93,13 +96,21 @@ class AppConfig:
 
             # Derive other common paths
             self.EXTRACT_BASE_DIR: Path = self.DOWNLOAD_DIR / "extracted_json"
+            self.PARQUET_DIR: Path = self.DOWNLOAD_DIR / "parquet_data"
             self.SUBMISSIONS_DIR: Path = self.EXTRACT_BASE_DIR / "submissions"
             self.COMPANYFACTS_DIR: Path = self.EXTRACT_BASE_DIR / "companyfacts"
             self.TICKER_FILE_PATH: Path = self.DOWNLOAD_DIR / "company_tickers.json"
 
             config_logger.info("Core configuration paths loaded successfully.")
             config_logger.info(f"  DOWNLOAD_DIR: {self.DOWNLOAD_DIR}")
+            config_logger.info(f"  PARQUET_DIR: {self.PARQUET_DIR}")
             config_logger.info(f"  DB_FILE: {self.DB_FILE}")
+
+            # Validate the User-Agent
+            if "PersonalResearchProject" in self.SEC_USER_AGENT or "your.email@example.com" in self.SEC_USER_AGENT:
+                config_logger.warning("SEC_USER_AGENT in .env seems generic. Update it with your specific project/contact info.")
+            elif not self.SEC_USER_AGENT:
+                raise KeyError("SEC_USER_AGENT")
 
         except KeyError as e:
             msg = f"FATAL: Missing required environment variable: {e}. Check .env file or environment."

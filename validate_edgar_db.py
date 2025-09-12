@@ -38,8 +38,7 @@ STOCK_TABLES = ["stock_history", "stock_fetch_errors"]
 # Tables loaded by stock_info_gatherer.py
 YF_INFO_TABLES = [
     "yf_profile_metrics", "yf_stock_actions", "yf_major_holders",
-    "yf_institutional_holders", "yf_mutual_fund_holders",
-    "yf_recommendations", "yf_calendar_events", "yf_financial_facts"
+    "yf_recommendations", "yf_info_fetch_errors"
 ]
 ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + YF_INFO_TABLES
 
@@ -118,22 +117,12 @@ def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Lo
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_profile_metrics: NULL PK/Timestamp Check", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_stock_actions WHERE ticker IS NULL OR action_date IS NULL OR action_type IS NULL;", "yf_stock_actions: NULL PK Check", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_major_holders: NULL PK/Timestamp Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_institutional_holders WHERE ticker IS NULL OR holder IS NULL OR report_date IS NULL;", "yf_institutional_holders: NULL PK Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_mutual_fund_holders WHERE ticker IS NULL OR holder IS NULL OR report_date IS NULL;", "yf_mutual_fund_holders: NULL PK Check", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_recommendations WHERE ticker IS NULL OR recommendation_timestamp IS NULL OR firm IS NULL;", "yf_recommendations: NULL PK Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_calendar_events WHERE ticker IS NULL OR event_type IS NULL;", "yf_calendar_events: NULL PK Check", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_financial_facts WHERE ticker IS NULL OR report_date IS NULL OR frequency IS NULL OR item_label IS NULL;", "yf_financial_facts: NULL PK Check", logger, expect_zero=True))
 
     # Data Range / Consistency Checks
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE cik IS NOT NULL AND LENGTH(cik) != 10;", "yf_profile_metrics: Invalid CIK format", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE pct_insiders < 0 OR pct_insiders > 1 OR pct_institutions < 0 OR pct_institutions > 1;", "yf_major_holders: Invalid Percentage Range", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_institutional_holders WHERE pct_out < 0 OR pct_out > 1;", "yf_institutional_holders: Invalid pct_out Range", logger, expect_zero=True))
-    results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_mutual_fund_holders WHERE pct_out < 0 OR pct_out > 1;", "yf_mutual_fund_holders: Invalid pct_out Range", logger, expect_zero=True))
     results.append(run_validation_query(con, "SELECT DISTINCT action_type FROM yf_stock_actions;", "yf_stock_actions: Distinct action_type", logger))
-    results.append(run_validation_query(con, "SELECT DISTINCT event_type FROM yf_calendar_events;", "yf_calendar_events: Distinct event_type", logger))
-    results.append(run_validation_query(con, "SELECT DISTINCT frequency FROM yf_financial_facts;", "yf_financial_facts: Distinct frequency", logger))
-    results.append(run_validation_query(con, "SELECT DISTINCT statement_type FROM yf_financial_facts;", "yf_financial_facts: Distinct statement_type", logger))
-    results.append(run_validation_query(con, "SELECT count(*) as count FROM yf_financial_facts WHERE value IS NULL;", "yf_financial_facts: Count of NULL values", logger, warning_threshold=10000)) # Example threshold
 
     return results
 
@@ -143,9 +132,7 @@ def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Log
     logger.info("\n=== Checking Ticker Consistency Across Tables (Expecting 0 violations) ===")
     yf_tables_with_ticker = [
         "stock_history", # From stock_data_gatherer
-        "yf_profile_metrics", "yf_stock_actions", "yf_major_holders",
-        "yf_institutional_holders", "yf_mutual_fund_holders",
-        "yf_recommendations", "yf_calendar_events", "yf_financial_facts"
+        "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations"
     ]
     for table in yf_tables_with_ticker:
         query = f"""

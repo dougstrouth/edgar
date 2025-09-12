@@ -39,6 +39,19 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 COMPANY_FACTS_URL_TEMPLATE = "https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK_PAD}.json"
 COMPANY_CONCEPT_URL_TEMPLATE = "https://data.sec.gov/api/xbrl/companyconcept/CIK{CIK_PAD}/{taxonomy}/{tag}.json"
 
+# --- Constants for Parsing ---
+FILING_FIELD_MAP = { # Map JSON keys to DB columns and converter functions
+    'accessionNumber': ('accession_number', str), 'filingDate': ('filing_date', lambda x: parse_date_string(x)),
+    'reportDate': ('report_date', lambda x: parse_date_string(x)), 'acceptanceDateTime': ('acceptance_datetime', lambda x: parse_datetime_string(x)),
+    'act': ('act', str), 'form': ('form', str), 'fileNumber': ('file_number', str),
+    'filmNumber': ('film_number', str), 'items': ('items', str),
+    'size': ('size', lambda x: int(x) if x is not None and str(x).isdigit() else None),
+    'isXBRL': ('is_xbrl', lambda x: bool(x) if x is not None else None),
+    'isInlineXBRL': ('is_inline_xbrl', lambda x: bool(x) if x is not None else None),
+    'primaryDocument': ('primary_document', str), 'primaryDocDescription': ('primary_doc_description', str),
+}
+
+
 # --- Helper Functions for Safe Date Parsing (Using logger) ---
 def parse_datetime_string(dt_str: Optional[str]) -> Optional[datetime]:
     """Safely parse ISO 8601 format datetime strings, handling None and errors."""
@@ -140,14 +153,14 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
     if not file_path.is_file():
         logger.error(f"Submission JSON not found: {file_path}")
         return None
-    logger.info(f"Parsing submission JSON for DB: {file_path.name}")
+    logger.debug(f"Parsing submission JSON for DB: {file_path.name}")
     try:
         with open(file_path, 'r', encoding='utf-8') as f: data = json.load(f)
     except Exception as e:
         logger.error(f"Failed load/decode submission JSON {file_path.name}: {e}", exc_info=True)
         return None
     if not isinstance(data, dict) or 'cik' not in data:
-        logger.error(f"Invalid structure in submission JSON: {file_path.name}")
+        logger.warning(f"Invalid structure in submission JSON: {file_path.name}")
         return None
 
     parsed_db_data: Dict[str, Union[Dict, List[Dict]]] = {
@@ -231,17 +244,7 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
                     else:
                         for i in range(num_filings):
                             filing_entry = {"cik": cik_padded}; valid_entry = True
-                            map_convert = { # Map JSON keys to DB columns and converter functions
-                                'accessionNumber': ('accession_number', str), 'filingDate': ('filing_date', parse_date_string),
-                                'reportDate': ('report_date', parse_date_string), 'acceptanceDateTime': ('acceptance_datetime', parse_datetime_string),
-                                'act': ('act', str), 'form': ('form', str), 'fileNumber': ('file_number', str),
-                                'filmNumber': ('film_number', str), 'items': ('items', str),
-                                'size': ('size', lambda x: int(x) if x is not None and str(x).isdigit() else None),
-                                'isXBRL': ('is_xbrl', lambda x: bool(x) if x is not None else None),
-                                'isInlineXBRL': ('is_inline_xbrl', lambda x: bool(x) if x is not None else None),
-                                'primaryDocument': ('primary_document', str), 'primaryDocDescription': ('primary_doc_description', str),
-                            }
-                            for json_key, (db_key, converter) in map_convert.items():
+                            for json_key, (db_key, converter) in FILING_FIELD_MAP.items():
                                 if json_key in recent:
                                      raw_value = recent[json_key][i]
                                      # Ensure converter gets string for str types, handle None
@@ -263,12 +266,37 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
 
         else: logger.warning(f"No valid 'filings.recent' data found in {file_path.name}")
 
-        logger.info(f"Structured submission data for DB from {file_path.name}")
+        logger.debug(f"Structured submission data for DB from {file_path.name}")
         return parsed_db_data
 
     except Exception as e:
         logger.error(f"Critical error structuring submission data CIK {data.get('cik', 'N/A')} from {file_path.name}: {e}", exc_info=True)
         return None
+
+def _convert_fact_value(raw_value: Any) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Converts a raw fact value into a numeric/text tuple.
+    Handles numbers, non-finite numbers (inf, NaN), and text.
+
+    Returns:
+        A tuple (numeric_value, text_value). One will always be None.
+    """
+    if raw_value is None:
+        return None, None
+
+    try:
+        # Attempt conversion to float first
+        numeric_val = float(raw_value)
+        # Check for non-finite numbers which are not useful for aggregation
+        if not math.isfinite(numeric_val):
+            # Store the original representation (e.g., "NaN", "Infinity") as text
+            return None, str(raw_value)
+        else:
+            # It's a valid, finite number
+            return numeric_val, None
+    except (ValueError, TypeError):
+        # If conversion to float fails, it's definitively text
+        return None, str(raw_value)
 
 
 # --- Function for Parsing CompanyFacts JSONs (Using logger) ---
@@ -284,14 +312,14 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
     if not file_path.is_file():
         logger.error(f"Company facts JSON file not found: {file_path}")
         return None
-    logger.info(f"Parsing company facts JSON for DB: {file_path.name}")
+    logger.debug(f"Parsing company facts JSON for DB: {file_path.name}")
     try:
         with open(file_path, 'r', encoding='utf-8') as f: data = json.load(f)
     except Exception as e:
         logger.error(f"Failed load/decode company facts JSON {file_path.name}: {e}", exc_info=True)
         return None
     if not isinstance(data, dict) or 'cik' not in data or 'facts' not in data:
-        logger.error(f"Invalid structure in company facts JSON: {file_path.name}")
+        logger.warning(f"Invalid structure in company facts JSON: {file_path.name}")
         return None
 
     parsed_db_data: Dict[str, Union[Optional[str], List[Dict]]] = {
@@ -299,7 +327,7 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
         "xbrl_tags": [],
         "xbrl_facts": []
     }
-    unique_tags: Set[Tuple[str, str]] = set()
+    unique_tags: Set[Tuple[str, str]] = set() # More specific type hint
 
     try:
         cik_padded = str(data.get('cik')).zfill(10)
@@ -333,34 +361,10 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
                     unit = str(unit_key)
                     if not isinstance(fact_instances, list): continue
                     for fact in fact_instances:
-                        if not isinstance(fact, dict): continue
+                        if not isinstance(fact, dict):
+                            continue
 
-                        raw_value = fact.get('val')
-                        value_numeric: Optional[float] = None
-                        value_text: Optional[str] = None
-
-                        # --- CORRECTED try...except block ---
-                        if raw_value is not None:
-                            try:
-                                # Attempt conversion to float
-                                value_numeric = float(raw_value)
-                                # Check for non-finite numbers (inf, -inf, NaN)
-                                if not math.isfinite(value_numeric):
-                                    value_text = str(raw_value) # Store original string
-                                    value_numeric = None      # Set numeric to None
-                                else:
-                                    # It's a valid finite number
-                                    value_text = None # No need for text version
-                            except (ValueError, TypeError):
-                                # Conversion failed, treat as text
-                                value_numeric = None
-                                value_text = str(raw_value)
-
-                            # Final check: Ensure text is populated if numeric is None
-                            # (This handles edge cases and the non-finite case above)
-                            if value_numeric is None and value_text is None:
-                                value_text = str(raw_value)
-                        # --- End CORRECTION ---
+                        value_numeric, value_text = _convert_fact_value(fact.get('val'))
 
                         accession_number = str(fact['accn']) if fact.get('accn') else None
                         fy_val = fact.get('fy'); fp_val = fact.get('fp'); form_val = fact.get('form'); frame_val = fact.get('frame')
@@ -368,7 +372,6 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
                         fact_record = {
                             "cik": cik_padded, "taxonomy": taxonomy, "tag_name": tag_name,
                             "accession_number": accession_number, "unit": unit,
-                            "period_start_date": parse_date_string(fact.get('start')),
                             "period_end_date": parse_date_string(fact.get('end')),
                             "value_numeric": value_numeric, "value_text": value_text,
                             "fy": int(fy_val) if fy_val is not None and isinstance(fy_val, (int, float)) or (isinstance(fy_val, str) and fy_val.isdigit()) else None,
@@ -382,7 +385,7 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
 
                         parsed_db_data["xbrl_facts"].append(fact_record)
 
-        logger.info(f"Structured facts data: {len(parsed_db_data['xbrl_tags'])} unique tags, {len(parsed_db_data['xbrl_facts'])} facts for CIK {cik_padded}.")
+        logger.debug(f"Structured facts data: {len(parsed_db_data['xbrl_tags'])} unique tags, {len(parsed_db_data['xbrl_facts'])} facts for CIK {cik_padded}.")
         return parsed_db_data
 
     except Exception as e:
@@ -391,6 +394,9 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
 
 # --- Main Execution (Example Usage using Config) ---
 if __name__ == "__main__":
+    # Set to DEBUG for more verbose output when running file directly
+    logger.setLevel(logging.DEBUG)
+
     logger.info(f"--- Running EDGAR Data Parser (Example Mode) ---")
 
     # --- Load Config for Example Paths ---

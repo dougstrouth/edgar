@@ -11,14 +11,16 @@ import duckdb
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+from typing import Dict, Any
 
 # Assuming the calling script will load dotenv,
 # so os.environ['DB_FILE'] should be available.
 
 def get_db_connection(
-    db_path_override: Optional[str] = None,
-    read_only: bool = False
+    db_path_override: Optional[Union[str, Path]] = None,
+    read_only: bool = False,
+    pragma_settings: Optional[Dict[str, Any]] = None
 ) -> Optional[duckdb.DuckDBPyConnection]:
     """
     Establishes a connection to the DuckDB database.
@@ -27,9 +29,10 @@ def get_db_connection(
     unless overridden by db_path_override. Handles ':memory:' databases.
 
     Args:
-        db_path_override: If provided, uses this path instead of DB_FILE env var.
-                          Use ':memory:' for an in-memory database.
+        db_path_override: If provided, uses this path (str or Path object)
+                          instead of DB_FILE env var. Use ':memory:'.
         read_only: Set to True to open the database in read-only mode.
+        pragma_settings: A dictionary of PRAGMA settings to apply on connect.
 
     Returns:
         A DuckDB connection object or None if connection fails.
@@ -40,14 +43,15 @@ def get_db_connection(
         Exception: Catches and logs DuckDB connection errors.
     """
     conn = None
-    db_path_str = ":memory:" # Default to memory if override is explicit memory
+    db_path_str = ""
     final_db_path = None # Store the Path object if it's a file
 
     if db_path_override:
-        db_path_str = db_path_override
+        # Handle both str and Path objects for the override
+        db_path_str = str(db_path_override)
         logging.info(f"Using override DB path: {db_path_str}")
         if db_path_override != ':memory:':
-             final_db_path = Path(db_path_override)
+             final_db_path = Path(db_path_override) # Convert to Path if not already
     else:
         try:
             db_path_str = os.environ['DB_FILE']
@@ -57,7 +61,11 @@ def get_db_connection(
             logging.error("DB_FILE environment variable not set and no override provided.")
             raise # Re-raise KeyError if DB_FILE is mandatory and not overridden
 
-    # --- Connection Logic ---
+    if not db_path_str:
+        logging.error("Database path is empty after checking override and environment.")
+        return None
+
+    # --- Connection Logic ---    
     is_memory = (db_path_str == ':memory:')
     try:
         # Ensure parent directory exists only if it's a file path
@@ -73,6 +81,20 @@ def get_db_connection(
 
         # Connect using the string path (works for :memory: and file paths)
         conn = duckdb.connect(database=db_path_str, read_only=read_only)
+
+        # --- Apply PRAGMA settings ---
+        if conn and pragma_settings:
+            for key, value in pragma_settings.items():
+                try:
+                    # Use proper formatting for string values
+                    if isinstance(value, str):
+                        conn.execute(f"PRAGMA {key} = '{value}';")
+                    else:
+                        conn.execute(f"PRAGMA {key} = {value};")
+                    logging.info(f"Set PRAGMA {key} = {value}")
+                except Exception as pragma_e:
+                    logging.warning(f"Could not set PRAGMA {key} = {value}: {pragma_e}")
+
         logging.info(f"Connected: {db_path_str} (RO: {read_only})")
         return conn
     except Exception as e:
@@ -98,16 +120,18 @@ class ManagedDatabaseConnection:
                 # Handle connection failure
                 print("Failed to connect to database.")
     """
-    def __init__(self, db_path_override: Optional[str] = None, read_only: bool = False):
+    def __init__(self, db_path_override: Optional[str] = None, read_only: bool = False, pragma_settings: Optional[Dict[str, Any]] = None):
         self._db_path_override = db_path_override
         self._read_only = read_only
+        self._pragma_settings = pragma_settings
         self.connection = None
 
     def __enter__(self) -> Optional[duckdb.DuckDBPyConnection]:
         """Establishes the database connection."""
         self.connection = get_db_connection(
             db_path_override=self._db_path_override,
-            read_only=self._read_only
+            read_only=self._read_only,
+            pragma_settings=self._pragma_settings
         )
         # Allow the 'with' block to check if connection is None
         return self.connection

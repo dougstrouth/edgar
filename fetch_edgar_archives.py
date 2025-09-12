@@ -22,6 +22,7 @@ import time
 import sys
 import zipfile
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 # from dotenv import load_dotenv # No longer needed here
 from datetime import datetime, timezone, timedelta
@@ -41,17 +42,13 @@ from database_conn import ManagedDatabaseConnection # Import DB context manager
 # SCRIPT_NAME = Path(__file__).stem (defined in __main__)
 # LOG_DIRECTORY = ... (defined in __main__)
 
-# SEC requires a User-Agent header - **MUST BE SET BY USER**
-# Consider moving this to .env or config if it changes per environment
-SEC_USER_AGENT = "PersonalResearchProject dougstrouth@gmail.com"
-
 DOWNLOAD_URLS = {
     "submissions": "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip",
     "companyfacts": "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip",
     "company_tickers": "https://www.sec.gov/files/company_tickers.json"
 }
 
-HEADERS = {'User-Agent': SEC_USER_AGENT}
+DEFAULT_MAX_CPU_IO_WORKERS = 8 # Default for extraction and parsing
 CATALOG_TABLE_NAME = "downloaded_archives"
 
 # --- Helper Functions (Updated to accept logger) ---
@@ -60,6 +57,7 @@ def download_file(
     url: str,
     destination_folder: Path,
     filename: str,
+    headers: Dict[str, str],
     logger: logging.Logger # Pass logger instance
 ) -> Path | None:
     """Downloads a file, shows progress. Uses provided logger."""
@@ -68,7 +66,7 @@ def download_file(
     logger.info(f"Attempting to download {url} to {filepath}")
     progress_bar = None
     try:
-        response = requests.get(url, headers=HEADERS, stream=True, timeout=600)
+        response = requests.get(url, headers=headers, stream=True, timeout=600)
         response.raise_for_status()
 
         total_size = int(response.headers.get('content-length', 0))
@@ -187,7 +185,7 @@ def upsert_archive_records(
 def extract_zip_json_members(
     zip_filepath: Path,
     extract_to_dir: Path,
-    logger: logging.Logger # Pass logger instance
+    max_workers: int # New parameter for parallelization
 ) -> List[Path]:
     """Extracts all '.json' files from a zip archive to a specified directory."""
     extracted_files = []
@@ -206,17 +204,30 @@ def extract_zip_json_members(
                 logger.warning(f"No '.json' files found in {zip_filepath.name}")
                 return []
 
-            for member in tqdm(json_members, desc=f"Extracting {zip_filepath.stem}", unit="file", leave=False):
-                try:
-                    target_path = extract_to_dir / Path(member.filename).name
-                    with open(target_path, "wb") as outfile:
-                        outfile.write(zip_ref.read(member.filename))
-                    if target_path.is_file(): extracted_files.append(target_path)
-                    else: logger.warning(f"Post-extraction check failed for {target_path}. Member: {member.filename}")
-                except KeyError: logger.error(f"KeyError extracting {member.filename} from {zip_filepath.name}. Skipping member.")
-                except zipfile.BadZipFile: logger.error(f"Bad zip file error processing member {member.filename} in {zip_filepath.name}. Skipping member.")
-                except OSError as e: logger.error(f"OS error extracting {member.filename} from {zip_filepath.name}: {e}. Skipping member.")
-                except Exception as e: logger.error(f"Unexpected error extracting {member.filename} from {zip_filepath.name}: {e}", exc_info=True)
+            # Use ThreadPoolExecutor for concurrent extraction
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Create a list of futures for each member to be extracted
+                futures = {
+                    executor.submit(
+                        _extract_single_member,
+                        zip_ref, member, extract_to_dir
+                    ): member for member in json_members
+                }
+
+                for future in tqdm(as_completed(futures), total=len(json_members), desc=f"Extracting {zip_filepath.stem}", unit="file", leave=False):
+                    member = futures[future]
+                    try:
+                        extracted_path = future.result()
+                        if extracted_path:
+                            extracted_files.append(extracted_path)
+                        else:
+                            logger.warning(f"Failed to extract {member.filename}. Check logs for details.")
+                    except Exception as exc:
+                        logger.error(f"Exception during extraction of {member.filename}: {exc}", exc_info=True)
+
+        # Ensure all files are closed before returning
+        if zip_ref:
+            zip_ref.close()
 
         logger.info(f"Finished extraction from {zip_filepath.name}. Extracted {len(extracted_files)} JSON files to {extract_to_dir}")
         return extracted_files
@@ -231,6 +242,25 @@ def extract_zip_json_members(
         logger.error(f"Error opening or processing zip file {zip_filepath.name}: {e}", exc_info=True)
         return []
 
+def _extract_single_member(zip_ref: zipfile.ZipFile, member: zipfile.ZipInfo, extract_to_dir: Path) -> Optional[Path]:
+    """Helper function to extract a single member from a zip file."""
+    try:
+        target_path = extract_to_dir / Path(member.filename).name
+        # Check if file already exists and is not empty to avoid re-extraction
+        if target_path.is_file() and target_path.stat().st_size > 0:
+            logger.debug(f"Skipping extraction of {member.filename}, already exists.")
+            return target_path
+
+        with open(target_path, "wb") as outfile:
+            outfile.write(zip_ref.read(member.filename))
+        if target_path.is_file():
+            return target_path
+        else:
+            logger.warning(f"Post-extraction check failed for {target_path}. Member: {member.filename}")
+            return None
+    except Exception as e:
+        logger.error(f"Error extracting {member.filename}: {e}", exc_info=True)
+        return None
 
 def get_json_sample_data(
     json_filepath: Path,
@@ -267,14 +297,20 @@ def get_json_sample_data(
 def extract_and_sample_zip_archive(
     zip_filepath: Path,
     extract_dir: Path,
-    logger: logging.Logger # Pass logger instance
+    max_workers: int # New parameter
 ) -> Tuple[str, str | None]:
     """Extracts JSON files from a ZIP archive and gets a sample from the first one."""
     logger.info(f"Processing ZIP archive for extraction and sampling: {zip_filepath.name}")
+    
+    # --- Cleanliness Step: Ensure a fresh start for extraction ---
+    if extract_dir.exists():
+        logger.info(f"Cleaning previous extraction data from {extract_dir}...")
+        shutil.rmtree(extract_dir)
+    
     extract_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pass logger to extraction function
-    extracted_json_files = extract_zip_json_members(zip_filepath, extract_dir, logger)
+    # Pass max_workers to extraction function
+    extracted_json_files = extract_zip_json_members(zip_filepath, extract_dir, max_workers)
 
     if not extracted_json_files:
         if not zip_filepath.exists(): return "Extraction Failed (ZIP Missing)", None
@@ -289,6 +325,43 @@ def extract_and_sample_zip_archive(
     if sample_data is None: return "Extracted (Sample Failed)", None
     else: return "Extracted", sample_data
 
+def _get_file_status(url: str, local_filepath: Path, headers: Dict[str, str], logger: logging.Logger) -> Tuple[bool, str, Optional[datetime]]:
+    """
+    Checks a local file against its remote source to determine if a download is needed.
+
+    Returns:
+        A tuple: (needs_download, status_message, local_modification_time)
+    """
+    if not local_filepath.exists():
+        logger.info(f"Local file not found: {local_filepath}. Requires download.")
+        return True, "Requires Download (Not Found)", None
+
+    logger.info(f"Local file exists: {local_filepath}")
+    try:
+        local_stat = local_filepath.stat()
+        local_mtime_dt = datetime.fromtimestamp(local_stat.st_mtime, timezone.utc)
+        logger.info(f"Local file last modified (UTC): {local_mtime_dt}, Size: {local_stat.st_size} bytes")
+
+        response = requests.head(url, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        if 'Last-Modified' in response.headers:
+            remote_last_modified_dt = parsedate_to_datetime(response.headers['Last-Modified'])
+            if remote_last_modified_dt.tzinfo is None:
+                remote_last_modified_dt = remote_last_modified_dt.replace(tzinfo=timezone.utc)
+            logger.info(f"Remote file last modified (UTC): {remote_last_modified_dt}")
+
+            if local_mtime_dt >= remote_last_modified_dt - timedelta(seconds=5):
+                logger.info(f"Local file '{local_filepath.name}' is up-to-date. Skipping download.")
+                return False, "Up-to-date", local_mtime_dt
+            else:
+                return True, "Requires Update", local_mtime_dt
+        else:
+            logger.warning(f"No 'Last-Modified' header for {url}. Assuming update needed.")
+            return True, "Requires Update (No Header)", local_mtime_dt
+    except Exception as e:
+        logger.warning(f"Error during HEAD check for {url}: {e}. Assuming download is needed.", exc_info=True)
+        return True, "Requires Download (Check Error)", None
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -307,6 +380,8 @@ if __name__ == "__main__":
     SCRIPT_NAME = Path(__file__).stem
     LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
     logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
+    max_cpu_io_workers = config.get_optional_int("MAX_CPU_IO_WORKERS", DEFAULT_MAX_CPU_IO_WORKERS)
+    headers = {'User-Agent': config.SEC_USER_AGENT}
 
     logger.info("--- Starting EDGAR Data Download, Extraction, and Cataloging ---")
     logger.info(f"Current working directory: {Path.cwd()}")
@@ -316,13 +391,6 @@ if __name__ == "__main__":
     logger.info(f"Using DB_FILE: {config.DB_FILE}")
 
     # --- Pre-run Checks ---
-    if "PersonalResearchProject" not in SEC_USER_AGENT or "doug.strouth@gmail.com" not in SEC_USER_AGENT:
-        logger.warning("SEC_USER_AGENT seems generic. Update it with specific project/contact info.")
-    if "YourCompanyName" in SEC_USER_AGENT or "YourAppName" in SEC_USER_AGENT or "YourContactEmail@example.com" in SEC_USER_AGENT:
-         logger.error("FATAL: SEC_USER_AGENT variable in the script must be updated.")
-         logger.error("Please set it to identify your application and provide a contact email.")
-         sys.exit("Stopping script: SEC User-Agent not configured.")
-
     try:
         config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
         config.EXTRACT_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -343,73 +411,16 @@ if __name__ == "__main__":
         archive_stem = local_filepath.stem
         specific_extract_dir = config.EXTRACT_BASE_DIR / archive_stem
 
-        status = "Unknown"
-        needs_download = True
-        download_success = False
         final_filepath = None
-        file_size = None
-        local_mtime_dt = None
-        needs_processing = False
 
         # --- File Check / Download Logic (Uses logger) ---
-        if local_filepath.exists():
-            logger.info(f"Local file exists: {local_filepath}")
-            try:
-                local_stat = local_filepath.stat()
-                local_mtime_timestamp = local_stat.st_mtime
-                local_mtime_dt = datetime.fromtimestamp(local_mtime_timestamp, timezone.utc)
-                file_size = local_stat.st_size
-                logger.info(f"Local file last modified (UTC): {local_mtime_dt}, Size: {file_size} bytes")
-
-                response = requests.head(url, headers=HEADERS, timeout=60)
-                response.raise_for_status()
-
-                if 'Last-Modified' in response.headers:
-                    remote_last_modified_str = response.headers['Last-Modified']
-                    remote_last_modified_dt = parsedate_to_datetime(remote_last_modified_str)
-                    if remote_last_modified_dt.tzinfo is None:
-                         remote_last_modified_dt = remote_last_modified_dt.replace(tzinfo=timezone.utc)
-                    logger.info(f"Remote file last modified (UTC): {remote_last_modified_dt}")
-
-                    if local_mtime_dt >= remote_last_modified_dt - timedelta(seconds=5):
-                        logger.info(f"Local file '{filename}' is up-to-date or newer. Skipping download.")
-                        needs_download = False
-                        status = "Up-to-date"
-                        final_filepath = local_filepath
-                        download_success = True
-                        if local_filepath.suffix.lower() == '.zip':
-                             if not specific_extract_dir.exists() or not any(specific_extract_dir.iterdir()):
-                                 logger.info(f"Zip '{filename}' is up-to-date, but extraction missing. Flagging for processing.")
-                                 needs_processing = True
-                             else:
-                                 logger.info(f"Zip '{filename}' is up-to-date and seems extracted. No processing needed now.")
-                                 needs_processing = False
-                                 status = "Extracted (Up-to-date)"
-                        else: needs_processing = False
-                    else:
-                         logger.info(f"Remote file '{filename}' is newer. Proceeding with download.")
-                         status = "Requires Update"; needs_processing = True
-                else:
-                    logger.warning(f"No 'Last-Modified' header for {url}. Assuming update needed.")
-                    status = "Requires Update (No Header)"; needs_processing = True
-
-            except requests.exceptions.Timeout:
-                 logger.warning(f"Timeout during HEAD check for {url}. Proceeding with download attempt.")
-                 status = "Requires Download (Check Timeout)"; needs_processing = True
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Error during HEAD check for {url}: {e}. Proceeding with download attempt.")
-                status = "Requires Download (Check Failed)"; needs_processing = True
-            except Exception as e:
-                logger.warning(f"Unexpected error during HEAD check for {url}: {e}. Proceeding with download attempt.", exc_info=True)
-                status = "Requires Download (Check Error)"; needs_processing = True
-        else:
-            logger.info(f"Local file not found: {local_filepath}. Proceeding with download.")
-            status = "Requires Download (Not Found)"; needs_processing = True
+        needs_download, status, local_mtime_dt = _get_file_status(url, local_filepath, headers, logger)
+        needs_processing = needs_download # Assume any downloaded file needs processing
 
         if needs_download:
             logger.info(f"Proceeding with download for {filename} (Reason: {status})")
             # Pass logger to download function
-            downloaded_path = download_file(url, config.DOWNLOAD_DIR, filename, logger)
+            downloaded_path = download_file(url, config.DOWNLOAD_DIR, filename, headers, logger)
             if downloaded_path and downloaded_path.is_file():
                  final_filepath = downloaded_path; download_success = True
                  if status.startswith("Requires Update"): status = "Updated"
@@ -434,10 +445,10 @@ if __name__ == "__main__":
             if final_filepath.suffix.lower() == '.zip':
                 logger.info(f"Processing required for ZIP: {final_filepath.name}")
                 # Pass logger to extraction/sampling function
-                process_status, sample_data = extract_and_sample_zip_archive(final_filepath, specific_extract_dir, logger)
+                process_status, sample_data = extract_and_sample_zip_archive(final_filepath, specific_extract_dir, max_cpu_io_workers)
                 status = process_status
                 if sample_data:
-                    sample_log_message = f"Sample data from {archive_stem}: {sample_data}"
+                    sample_log_message = f"Sample data from {archive_stem}: {sample_data}" # noqa
                     logger.info(sample_log_message)
             elif final_filepath.suffix.lower() == '.json':
                  logger.info(f"File {final_filepath.name} is JSON. No extraction needed.")
@@ -450,17 +461,7 @@ if __name__ == "__main__":
 
         # --- Record Metadata (Logic unchanged, but context provides logger) ---
         if final_filepath and final_filepath.is_file():
-             metadata = { "file_path": str(final_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": file_size, "local_last_modified_utc": local_mtime_dt, "download_timestamp_utc": current_run_timestamp, "status": status }
-             download_metadata_list.append(metadata)
-        elif status == "Failed" or status.startswith("Failed") or status.startswith("Extraction Failed"):
-             metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": None, "local_last_modified_utc": None, "download_timestamp_utc": current_run_timestamp, "status": status }
-             download_metadata_list.append(metadata)
-        elif not needs_download and not needs_processing and status == "Up-to-date":
-             metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": file_size, "local_last_modified_utc": local_mtime_dt, "download_timestamp_utc": current_run_timestamp, "status": status }
-             download_metadata_list.append(metadata)
-        elif not needs_download and not needs_processing and status == "Extracted (Up-to-date)":
-              metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": file_size, "local_last_modified_utc": local_mtime_dt, "download_timestamp_utc": current_run_timestamp, "status": status }
-              download_metadata_list.append(metadata)
+            download_metadata_list.append({ "file_path": str(final_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": file_size, "local_last_modified_utc": local_mtime_dt, "download_timestamp_utc": current_run_timestamp, "status": status })
         else:
              logger.error(f"Could not reliably catalog metadata for {key} (Status: {status}, Needs Download: {needs_download}, Needs Processing: {needs_processing}).")
              metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": None, "local_last_modified_utc": None, "download_timestamp_utc": current_run_timestamp, "status": f"Cataloging Error ({status})" }
