@@ -1,0 +1,10 @@
+# This file contains the connection details for your dbt project.
+# It is configured to read the database path from your .env file.
+
+edgar_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DB_FILE') }}"
+      threads: 4 # Adjust based on your machine's core count

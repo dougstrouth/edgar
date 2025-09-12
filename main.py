@@ -66,6 +66,7 @@ SCRIPTS = {
     "load_macro": SCRIPT_DIR / "load_supplementary_data.py",
     "gather_market_risk": SCRIPT_DIR / "market_risk_gatherer.py",
     "load_market_risk": SCRIPT_DIR / "load_supplementary_data.py",
+    "dbt": None, # Special case for dbt
     "feature_eng": SCRIPT_DIR / "feature_engineering.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
@@ -83,6 +84,9 @@ def run_script(script_key: str, script_args: Optional[List[str]] = None) -> bool
         True if the script ran successfully, False otherwise.
     """
     script_path = SCRIPTS.get(script_key)
+    if script_key == "dbt":
+        # Special handling for dbt
+        return run_dbt_command(script_args)
 
     if not script_path or not script_path.is_file():
         logger.error(f"Script for '{script_key}' not found at: {script_path}")
@@ -118,6 +122,39 @@ def run_script(script_key: str, script_args: Optional[List[str]] = None) -> bool
     finally:
         sys.argv = original_argv # Always restore the original sys.argv
 
+def run_dbt_command(args: Optional[List[str]] = None) -> bool:
+    """Runs a dbt command using the dbt-core library."""
+    # If no specific args are passed (e.g., from 'python main.py dbt'), default to 'run'
+    if not args:
+        args = ["run"] # Default command is 'run'
+
+    # Add the --profiles-dir flag to make the dbt project self-contained
+    dbt_args = ["--profiles-dir", "."] + args
+
+    logger.info(f"---===[ Running Step: DBT with args: {dbt_args} ]===---")
+    start_time = time.time()
+    try:
+        # Import dbt only when needed
+        from dbt.cli.main import dbtRunner, dbtRunnerResult
+
+        dbt = dbtRunner()
+        res: dbtRunnerResult = dbt.invoke(dbt_args)
+
+        end_time = time.time()
+        if res.success:
+            logger.info(f"---===[ Finished Step: DBT in {end_time - start_time:.2f}s ]===---")
+            return True
+        else:
+            logger.error(f"---===[ Step 'DBT' FAILED in {end_time - start_time:.2f}s ]===---")
+            # Log the actual dbt exception if it exists
+            if res.exception:
+                logger.error(f"dbt execution error: {res.exception}", exc_info=res.exception)
+            return False
+    except Exception as e:
+        end_time = time.time()
+        logger.critical(f"---===[ Step 'DBT' FAILED with an unhandled exception in {end_time - start_time:.2f}s ]===---", exc_info=True)
+        return False
+
 def main():
     """Parses command-line arguments and runs the requested pipeline steps."""
     parser = argparse.ArgumentParser(description="Orchestrator for the EDGAR Data Pipeline.")
@@ -127,8 +164,8 @@ def main():
         default="all",
         choices=[
             "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
-            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro",
-            "gather_market_risk", "load_market_risk"
+            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro", "dbt",
+            "gather_market_risk", "load_market_risk",
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
@@ -157,6 +194,7 @@ def main():
             ("load_macro", ["macro_economic_data", "--full-refresh"]),
             ("gather_market_risk", None),
             ("load_market_risk", ["market_risk_factors", "--full-refresh"]),
+            ("dbt", ["run"]), # Run dbt models
             ("validate", None),
             ("cleanup", ['--all', '--cache'])
         ]

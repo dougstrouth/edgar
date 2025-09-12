@@ -19,6 +19,7 @@ logs/ # Already present, but good to confirm
 # Virtual environments
 .venv
 .env
+.profiles.yml
 
 # Logs
 *.log
