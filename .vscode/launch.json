@@ -54,16 +54,34 @@
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
-            "args": ["cleanup", "--all"],
+            "args": ["cleanup", "--all", "--cache"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug CLI: cleanup",
+            "name": "Debug CLI: load-stocks",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
-            "args": ["cleanup", "--all", "--cache"],
+            "args": ["load-stocks", "stock_history", "stock_fetch_errors", "yf_untrackable_tickers"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug CLI: load-info",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load-info", "all_yf"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug CLI: load-macro",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load-macro", "macro_economic_data"],
             "console": "integratedTerminal",
             "justMyCode": true
         },

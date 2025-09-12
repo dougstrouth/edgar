@@ -63,6 +63,7 @@ SCRIPTS = {
     "load_stocks": SCRIPT_DIR / "load_supplementary_data.py",
     "load_info": SCRIPT_DIR / "load_supplementary_data.py",
     "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
+    "load_macro": SCRIPT_DIR / "load_supplementary_data.py",
     "feature_eng": SCRIPT_DIR / "feature_engineering.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
@@ -121,7 +122,10 @@ def main():
         "step",
         nargs="?",
         default="all",
-        choices=["all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng"],
+        choices=[
+            "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
+            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro"
+        ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
 
@@ -137,19 +141,21 @@ def main():
 
     if args.step == "all":
         # Run cleanup at the end to free up space
-        pipeline_steps = [
-            "fetch", "parse_to_parquet", "load",
-            # "gather_stocks",  # Temporarily disabled due to yfinance rate-limiting
-            # "gather_info",    # Temporarily disabled due to yfinance rate-limiting
-            # "gather_macro",   # Temporarily disabled
-            "feature_eng",
-            "validate",
-            "cleanup"
+        pipeline_steps_with_args = [
+            ("fetch", None),
+            ("parse_to_parquet", None),
+            ("load", None),
+            ("gather_stocks", ["--full-refresh"]),
+            ("load_stocks", ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers", "--full-refresh"]),
+            ("gather_info", None),
+            ("load_info", ["all_yf", "--full-refresh"]),
+            ("gather_macro", None),
+            ("load_macro", ["macro_economic_data", "--full-refresh"]),
+            ("validate", None),
+            ("cleanup", ['--all', '--cache'])
         ]
         logger.info("Running full pipeline...")
-        for step_name in pipeline_steps:
-            # For the cleanup step in an 'all' run, pass the '--all' flag to remove both JSON and Parquet
-            script_args = ['--all', '--cache'] if step_name == "cleanup" else None
+        for step_name, script_args in pipeline_steps_with_args:
             if not run_script(step_name, script_args=script_args):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
                 sys.exit(1)
