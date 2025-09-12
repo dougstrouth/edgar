@@ -69,7 +69,8 @@ if __name__ == "__main__":
     LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
     logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
     parquet_converter.logger = logger # Share logger with converter
-    json_parse.logger.setLevel(logging.WARNING) # Make json_parse less verbose
+    # Configure the json_parse logger to be less verbose
+    logging.getLogger(json_parse.__name__).setLevel(logging.WARNING)
 
     max_parsing_workers = config.get_optional_int("MAX_CPU_IO_WORKERS", DEFAULT_MAX_CPU_IO_WORKERS)
 

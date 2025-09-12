@@ -301,12 +301,8 @@ def extract_and_sample_zip_archive(
 ) -> Tuple[str, str | None]:
     """Extracts JSON files from a ZIP archive and gets a sample from the first one."""
     logger.info(f"Processing ZIP archive for extraction and sampling: {zip_filepath.name}")
-    
-    # --- Cleanliness Step: Ensure a fresh start for extraction ---
-    if extract_dir.exists():
-        logger.info(f"Cleaning previous extraction data from {extract_dir}...")
-        shutil.rmtree(extract_dir)
-    
+
+    # Ensure the target directory exists. The extraction logic will skip existing files.
     extract_dir.mkdir(parents=True, exist_ok=True)
 
     # Pass max_workers to extraction function
@@ -412,6 +408,7 @@ if __name__ == "__main__":
         specific_extract_dir = config.EXTRACT_BASE_DIR / archive_stem
 
         final_filepath = None
+        file_size = None # Initialize
 
         # --- File Check / Download Logic (Uses logger) ---
         needs_download, status, local_mtime_dt = _get_file_status(url, local_filepath, headers, logger)
@@ -436,8 +433,14 @@ if __name__ == "__main__":
             else:
                 logger.warning(f"Download failed for {key}.")
                 status = "Failed"; download_success = False; needs_processing = False
-        elif status == "Up-to-date" and needs_processing:
-            logger.info(f"File {filename} is up-to-date but requires processing.")
+        else: # File is up-to-date, not downloaded
+            final_filepath = local_filepath
+            try:
+                file_size = final_filepath.stat().st_size
+            except OSError as e:
+                logger.error(f"Could not get stats for existing file {final_filepath}: {e}")
+                status = "Failed Stat"
+
 
         # --- Post-Download/Check Processing (Uses logger) ---
         sample_log_message = ""
@@ -454,9 +457,9 @@ if __name__ == "__main__":
                  logger.info(f"File {final_filepath.name} is JSON. No extraction needed.")
                  needs_processing = False
             else:
-                logger.warning(f"File {final_filepath.name} is not a ZIP or JSON. Skipping processing.")
+                logger.debug(f"File {final_filepath.name} is not a ZIP or JSON. Skipping processing.")
                 needs_processing = False
-        elif status == "Extracted (Up-to-date)":
+        elif status == "Up-to-date" and not needs_processing:
              logger.info(f"Skipping processing for {filename} as it's up-to-date and already extracted.")
 
         # --- Record Metadata (Logic unchanged, but context provides logger) ---

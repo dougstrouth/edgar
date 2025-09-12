@@ -30,6 +30,7 @@ import logging
 import runpy
 from pathlib import Path
 import time
+from typing import Optional, List
 
 # Ensure utility modules can be found. This is generally good practice,
 # especially if the script is run from a different working directory.
@@ -59,6 +60,13 @@ SCRIPTS = {
     "load": SCRIPT_DIR / "edgar_data_loader.py", # This now loads from Parquet
     "gather_stocks": SCRIPT_DIR / "stock_data_gatherer.py",
     "gather_info": SCRIPT_DIR / "stock_info_gatherer.py",
+    "load_stocks": SCRIPT_DIR / "load_supplementary_data.py",
+    "load_info": SCRIPT_DIR / "load_supplementary_data.py",
+    "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
+    "load_macro": SCRIPT_DIR / "load_supplementary_data.py",
+    "gather_market_risk": SCRIPT_DIR / "market_risk_gatherer.py",
+    "load_market_risk": SCRIPT_DIR / "load_supplementary_data.py",
+    "feature_eng": SCRIPT_DIR / "feature_engineering.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
 }
@@ -116,11 +124,15 @@ def main():
         "step",
         nargs="?",
         default="all",
-        choices=["all", "fetch", "parse-to-parquet", "load", "gather-stocks", "gather-info", "validate", "cleanup"],
+        choices=[
+            "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
+            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro",
+            "gather_market_risk", "load_market_risk"
+        ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
 
-    args = parser.parse_args()
+    args, remaining_args = parser.parse_known_args()
 
     # Load config to log paths, though individual scripts will load it too.
     try:
@@ -132,18 +144,43 @@ def main():
 
     if args.step == "all":
         # Run cleanup at the end to free up space
-        pipeline_steps = ["fetch", "parse-to-parquet", "load", "gather_stocks", "gather_info", "validate", "cleanup"]
+        pipeline_steps_with_args = [
+            ("fetch", None),
+            ("parse_to_parquet", None),
+            ("load", None),
+            ("gather_stocks", ["--full-refresh"]),
+            ("load_stocks", ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers", "--full-refresh"]),
+            ("gather_info", None),
+            ("load_info", ["all_yf", "--full-refresh"]),
+            ("gather_macro", None),
+            ("load_macro", ["macro_economic_data", "--full-refresh"]),
+            ("gather_market_risk", None),
+            ("load_market_risk", ["market_risk_factors", "--full-refresh"]),
+            ("validate", None),
+            ("cleanup", ['--all', '--cache'])
+        ]
         logger.info("Running full pipeline...")
-        for step_name in pipeline_steps:
-            script_args = ['--json'] if step_name == "cleanup" else None
+        for step_name, script_args in pipeline_steps_with_args:
             if not run_script(step_name, script_args=script_args):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
                 sys.exit(1)
         logger.info("Full pipeline completed successfully!")
     else:
         # Map CLI argument to script key
-        script_key = args.step.replace("-", "_")
-        if not run_script(script_key):
+        script_key = args.step
+
+        # Prepare arguments for specific loader scripts that require a source
+        final_args = remaining_args
+        if script_key == "load_macro":
+            final_args = ["macro_economic_data"] + remaining_args
+        elif script_key == "load_stocks":
+            final_args = ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers"] + remaining_args
+        elif script_key == "load_info":
+            final_args = ["all_yf"] + remaining_args
+        elif script_key == "load_market_risk":
+            final_args = ["market_risk_factors"] + remaining_args
+
+        if not run_script(script_key, script_args=final_args):
             sys.exit(1)
 
 if __name__ == "__main__":

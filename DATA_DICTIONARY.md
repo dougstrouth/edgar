@@ -95,6 +95,21 @@ erDiagram
     yf_major_holders {
         double pct_insiders
     }
+    macro_economic_data {
+        varchar series_id PK
+        date date PK
+        double value
+    }
+    market_risk_factors {
+        date date PK
+        varchar factor_model PK
+        double mkt_minus_rf
+        double smb
+        double hml
+        double rmw
+        double cma
+        double rf
+    }
 
     companies ||--o{ tickers : "has"
     companies ||--o{ former_names : "had"
@@ -110,6 +125,10 @@ erDiagram
     tickers ||--o{ yf_balance_sheet : "reports"
     tickers ||--o{ yf_cash_flow : "reports"
     tickers |o--o| yf_major_holders : "has"
+    tickers |o--o| yf_untrackable_tickers : "may be"
+    tickers |o--o| stock_fetch_errors : "may have"
+    market_risk_factors }o..o{ stock_history : "provides context for"
+    macro_economic_data }o..o{ xbrl_facts : "provides context for"
 ```
 
 ---
