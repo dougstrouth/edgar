@@ -40,10 +40,13 @@ YF_INFO_TABLES = [
     "yf_profile_metrics", "yf_stock_actions", "yf_major_holders",
     "yf_recommendations", "yf_info_fetch_errors"
 ]
-ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + YF_INFO_TABLES
+# Tables from macro/market sources
+ECONOMIC_TABLES = ["macro_economic_data", "market_risk_factors"]
+
+ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + YF_INFO_TABLES + ECONOMIC_TABLES
 
 # --- Validation Helper Function ---
-def run_validation_query(con: duckdb.DuckDBPyConnection, query: str, description: str, logger: logging.Logger, expect_zero: bool = False, warning_threshold: Optional[int] = None):
+def run_validation_query(con: duckdb.DuckDBPyConnection, query: str, description: str, logger: logging.Logger, expect_zero: bool = False, warning_threshold: Optional[int] = None) -> Tuple[Optional[str], Optional[int], str]:
     """Runs a validation query, logs the result, and optionally flags non-zero counts."""
     logger.info(f"--- Running Check: {description} ---")
     try:
@@ -53,27 +56,27 @@ def run_validation_query(con: duckdb.DuckDBPyConnection, query: str, description
         else: logger.info(f"Result: Query returned {len(result_df)} rows. Sample:\n{result_df.head().to_string(index=False)}")
 
         # Check if the result indicates an issue
-        is_issue = False
+        failure_type: Optional[str] = None
         count_val = None
         if "count" in result_df.columns and not result_df.empty:
             count_val = result_df['count'].iloc[0]
             if expect_zero and count_val != 0:
-                is_issue = True
+                failure_type = 'error'
                 logger.warning(f"FAILED Check '{description}': Expected 0 count, got {count_val}.")
             elif warning_threshold is not None and count_val > warning_threshold:
-                is_issue = True # Consider it an issue for summary, but log as warning
+                failure_type = 'warning'
                 logger.warning(f"THRESHOLD Check '{description}': Count {count_val} exceeds threshold {warning_threshold}.")
 
         # Log simplified result for summary later if needed
-        return is_issue, count_val, description
+        return failure_type, count_val, description
 
     except Exception as e:
         logger.error(f"FAILED Check '{description}' with error: {e}", exc_info=True)
-        return True, None, description # Treat execution errors as issues
+        return 'error', None, description # Treat execution errors as issues
 
 # --- Specific Validation Check Functions ---
 
-def check_table_counts(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+def check_table_counts(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Checks row counts for all expected tables."""
     results = []
     logger.info("\n=== Checking Table Row Counts ===")
@@ -85,13 +88,13 @@ def check_table_counts(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -
               # Treat missing EDGAR tables as errors, but supplementary tables as warnings
               if table in EDGAR_TABLES:
                   logger.error(f"MISSING Table Check: Core EDGAR table '{table}' not found.")
-                  results.append((True, None, f"Missing Table Check: {table}"))
+                  results.append(('error', None, f"Missing Table Check: {table}"))
               else:
                   logger.warning(f"SKIPPED Table Check: Supplementary table '{table}' not found.")
                   # Do not append as an issue if it's a supplementary table
     return results
 
-def check_edgar_fk_integrity(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+def check_edgar_fk_integrity(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Checks foreign key relationships within EDGAR tables."""
     results = []
     logger.info("\n=== Checking EDGAR Foreign Key Integrity (Expecting 0 violations) ===")
@@ -103,7 +106,7 @@ def check_edgar_fk_integrity(con: duckdb.DuckDBPyConnection, logger: logging.Log
     results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM xbrl_facts f LEFT JOIN xbrl_tags t ON f.taxonomy = t.taxonomy AND f.tag_name = t.tag_name WHERE t.taxonomy IS NULL;", "FK Violation Check: xbrl_facts -> xbrl_tags", logger, expect_zero=True))
     return results
 
-def check_orphaned_facts(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+def check_orphaned_facts(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Checks the orphaned facts table."""
     results = []
     logger.info("\n=== Checking Orphaned Facts Table ===")
@@ -113,7 +116,7 @@ def check_orphaned_facts(con: duckdb.DuckDBPyConnection, logger: logging.Logger)
     results.append(run_validation_query(con, "SELECT COUNT(o.*) as count FROM xbrl_facts_orphaned o JOIN filings f ON o.accession_number = f.accession_number AND o.cik = f.cik;", "Orphan Check: Orphaned facts with existing filings", logger, expect_zero=True))
     return results
 
-def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Runs various checks on the yfinance supplementary tables."""
     results = []
     logger.info("\n=== Checking Yahoo Finance Data Integrity ===")
@@ -140,7 +143,7 @@ def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Lo
 
     return results
 
-def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Checks if tickers in stock/yf tables exist in the main 'tickers' table."""
     results = []
     db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
@@ -168,6 +171,25 @@ def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Log
     # results.append(run_validation_query(con, query_missing_yf, "Ticker Consistency Check: tickers missing yf_profile", logger, warning_threshold=100)) # Allow some missing
     return results
 
+def check_market_risk_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
+    """Runs various checks on the Fama-French market risk data."""
+    results = []
+    logger.info("\n=== Checking Market Risk Data Integrity ===")
+
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+    table_name = "market_risk_factors"
+
+    if table_name in db_tables:
+        # Check for NULLs in primary key columns
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE date IS NULL OR factor_model IS NULL;", f"{table_name}: NULL PK Check", logger, expect_zero=True))
+        
+        # Check for NULLs in the main market risk premium column
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE mkt_minus_rf IS NULL;", f"{table_name}: NULL Market Risk Premium Check", logger, expect_zero=True))
+
+        # Informational check for distinct models
+        results.append(run_validation_query(con, f"SELECT DISTINCT factor_model FROM {table_name};", f"{table_name}: Distinct Factor Models", logger))
+    
+    return results
 
 # --- Main Orchestration Function ---
 def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
@@ -178,31 +200,29 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     all_results.extend(check_orphaned_facts(con, logger))
     all_results.extend(check_yf_data_validations(con, logger)) # Add new YF checks
     all_results.extend(check_table_uniqueness(con, logger))
+    all_results.extend(check_market_risk_validations(con, logger))
     # all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
 
     # --- Summarize Results ---
     logger.info("\n=== Validation Summary ===")
     
-    # Separate issues into categories
-    hard_failures = [res for res in all_results if res[0] and not res[2].startswith("THRESHOLD Check") and not res[2].startswith("Missing Table Check")]
-    warnings_found = [res for res in all_results if res[0] and res[2].startswith("THRESHOLD Check")]
-    missing_tables = [res for res in all_results if res[0] and res[2].startswith("Missing Table Check")]
-
-    # Report missing tables first as they are critical
-    if missing_tables:
-         logger.error(f"{len(missing_tables)} Expected Table(s) MISSING:")
-         for _, _, desc in missing_tables: logger.error(f"  - {desc}")
+    hard_failures = [res for res in all_results if res[0] == 'error']
+    warnings_found = [res for res in all_results if res[0] == 'warning']
     
     # Report hard failures
     if hard_failures:
-        logger.error(f"{len(hard_failures)} Validation Check(s) FAILED (Expected 0 count or Error).")
+        logger.error(f"{len(hard_failures)} Validation Check(s) FAILED:")
+        for _, _, desc in hard_failures:
+            logger.error(f"  - FAILED: {desc}")
     
     # Report warnings
     if warnings_found:
-        logger.warning(f"{len(warnings_found)} Validation Warning(s) (Threshold Exceeded).")
+        logger.warning(f"{len(warnings_found)} Validation Warning(s) triggered:")
+        for _, _, desc in warnings_found:
+            logger.warning(f"  - WARNING: {desc}")
 
     # Final summary message
-    if not hard_failures and not missing_tables:
+    if not hard_failures:
         if warnings_found:
             logger.warning("Validation passed with warnings. Review logs above for details.")
         else:
@@ -210,7 +230,7 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     else:
         logger.error("Validation finished with errors. Review logs above for details.")
 
-def check_table_uniqueness(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[bool, Optional[int], str]]:
+def check_table_uniqueness(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """
     Checks the tables for uniqueness of primary keys and essential identifiers.
     """

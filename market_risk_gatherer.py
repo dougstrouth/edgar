@@ -11,6 +11,7 @@ This script uses the pandas-datareader library, which does not require an API ke
 import sys
 import time
 import logging
+import warnings
 import shutil
 from pathlib import Path
 
@@ -58,7 +59,11 @@ def run_market_risk_pipeline(config: AppConfig):
         try:
             # Fetch the data. The result is a dictionary of DataFrames.
             # We are interested in the first one (index 0) which contains the factors.
-            ff_data = web.DataReader(dataset_name, 'famafrench', start='1900-01-01')[0]
+            # Suppress the date_parser FutureWarning from pandas_datareader as we handle parsing manually.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                ff_data = web.DataReader(dataset_name, 'famafrench', start='1900-01-01')[0]
+
             ff_data.reset_index(inplace=True)
             
             ff_data.rename(columns={'Date': 'date', 'Mkt-RF': 'mkt_minus_rf'}, inplace=True)
