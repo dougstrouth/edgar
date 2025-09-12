@@ -12,6 +12,7 @@ This script requires a FRED_API_KEY to be set in the .env file.
 import sys
 import time
 import logging
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -50,6 +51,12 @@ def run_macro_data_pipeline(config: AppConfig):
     """
     logger.info("--- Starting FRED Macroeconomic Data Pipeline ---")
     start_time = time.time()
+
+    # --- Cleanliness Step: Ensure a fresh start for the Parquet directory ---
+    target_parquet_dir = config.PARQUET_DIR / MACRO_TABLE_NAME
+    if target_parquet_dir.exists():
+        logger.info(f"Cleaning previous Parquet data from {target_parquet_dir}...")
+        shutil.rmtree(target_parquet_dir)
 
     # 1. Get API Key from config
     api_key = config.get_optional_var("FRED_API_KEY")
