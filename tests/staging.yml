@@ -1,0 +1,7 @@
+version: 2
+
+models:
+  - name: stg_financials_pivoted
+    description: "Staging model that pivots the raw, long-format xbrl_facts table into a wide format. This is an intermediate step and not intended for direct analysis."
+    config:
+      materialized: view

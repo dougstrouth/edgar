@@ -31,3 +31,13 @@ models:
 
   - name: fct_combined_financials
     description: "Fact table combining annual financial facts with macro and market risk data."
+
+  - name: dbg_asset_liability_discrepancies
+    description: "Debugging table that materializes all records where total_assets < total_liabilities, along with their raw components for analysis."
+    config:
+      materialized: table
+
+  - name: dbg_zero_or_null_assets
+    description: "Debugging table that materializes all records where total_assets is NULL or <= 0, along with their raw components for analysis."
+    config:
+      materialized: table
