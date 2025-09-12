@@ -92,16 +92,6 @@ erDiagram
         varchar item_name PK
         bigint item_value
     }
-    stock_fetch_errors {
-        varchar cik
-        varchar ticker
-        timestamptz error_timestamp
-        varchar error_message
-    }
-    yf_untrackable_tickers {
-        varchar ticker PK
-        varchar reason
-    }
     yf_major_holders {
         double pct_insiders
     }
@@ -109,6 +99,16 @@ erDiagram
         varchar series_id PK
         date date PK
         double value
+    }
+    market_risk_factors {
+        date date PK
+        varchar factor_model PK
+        double mkt_minus_rf
+        double smb
+        double hml
+        double rmw
+        double cma
+        double rf
     }
 
     companies ||--o{ tickers : "has"
@@ -127,6 +127,7 @@ erDiagram
     tickers |o--o| yf_major_holders : "has"
     tickers |o--o| yf_untrackable_tickers : "may be"
     tickers |o--o| stock_fetch_errors : "may have"
+    market_risk_factors }o..o{ stock_history : "provides context for"
     macro_economic_data }o..o{ xbrl_facts : "provides context for"
 ```
 

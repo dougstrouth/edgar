@@ -64,6 +64,8 @@ SCRIPTS = {
     "load_info": SCRIPT_DIR / "load_supplementary_data.py",
     "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
     "load_macro": SCRIPT_DIR / "load_supplementary_data.py",
+    "gather_market_risk": SCRIPT_DIR / "market_risk_gatherer.py",
+    "load_market_risk": SCRIPT_DIR / "load_supplementary_data.py",
     "feature_eng": SCRIPT_DIR / "feature_engineering.py",
     "validate": SCRIPT_DIR / "validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
@@ -124,7 +126,8 @@ def main():
         default="all",
         choices=[
             "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
-            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro"
+            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro",
+            "gather_market_risk", "load_market_risk"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
@@ -151,6 +154,8 @@ def main():
             ("load_info", ["all_yf", "--full-refresh"]),
             ("gather_macro", None),
             ("load_macro", ["macro_economic_data", "--full-refresh"]),
+            ("gather_market_risk", None),
+            ("load_market_risk", ["market_risk_factors", "--full-refresh"]),
             ("validate", None),
             ("cleanup", ['--all', '--cache'])
         ]
@@ -172,6 +177,8 @@ def main():
             final_args = ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers"] + remaining_args
         elif script_key == "load_info":
             final_args = ["all_yf"] + remaining_args
+        elif script_key == "load_market_risk":
+            final_args = ["market_risk_factors"] + remaining_args
 
         if not run_script(script_key, script_args=final_args):
             sys.exit(1)

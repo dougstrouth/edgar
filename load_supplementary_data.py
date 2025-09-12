@@ -111,6 +111,19 @@ SUPPLEMENTARY_SCHEMAS = {
             PRIMARY KEY (series_id, date)
         );
     """,
+    "market_risk_factors": """
+        CREATE TABLE IF NOT EXISTS market_risk_factors (
+            date DATE NOT NULL,
+            factor_model VARCHAR NOT NULL,
+            mkt_minus_rf DOUBLE,
+            smb DOUBLE,
+            hml DOUBLE,
+            rmw DOUBLE,
+            cma DOUBLE,
+            rf DOUBLE,
+            PRIMARY KEY (date, factor_model)
+        );
+    """,
     # Add schemas for yf_info tables here as they are created
 }
 
