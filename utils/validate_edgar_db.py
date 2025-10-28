@@ -18,11 +18,17 @@ import logging # Keep for level constants
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
 try:
-    from config_utils import AppConfig
-    from logging_utils import setup_logging
-    from database_conn import ManagedDatabaseConnection
+    from utils.config_utils import AppConfig
+    from utils.logging_utils import setup_logging
+    from utils.database_conn import ManagedDatabaseConnection
 except ImportError as e:
     print(f"FATAL: Could not import utility modules: {e}", file=sys.stderr)
     sys.exit(1)

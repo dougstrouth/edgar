@@ -11,6 +11,13 @@ import pandas as pd
 from pathlib import Path
 import logging
 from typing import Dict, List, Set, Tuple, Optional
+import sys
+
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
 
 # This module is a utility, so it will use the logger from the calling script.
 logger = logging.getLogger(__name__)

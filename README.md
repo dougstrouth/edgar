@@ -1,4 +1,4 @@
-﻿﻿# EDGAR Analytics Pipeline
+# EDGAR Analytics Pipeline
 
 This project provides a robust, end-to-end data engineering pipeline for downloading, parsing, and storing financial data from the U.S. Securities and Exchange Commission (SEC) EDGAR system and other supplementary sources. The data is structured and loaded into a DuckDB database, creating a powerful, local analytics engine suitable for financial analysis and machine learning applications.
 
@@ -19,34 +19,14 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
 *   **Centralized Orchestration**: A single `main.py` entry point provides a command-line interface (CLI) to run the entire pipeline or any specific step, simplifying execution.
 *   **Integrated Utilities**: Includes dedicated scripts for data validation (`validate_edgar_db.py`) and cleanup of intermediate artifacts (`cleanup_artifacts.py`) to manage disk space and ensure data quality.
 
-## Project Structure
+## Getting Started
 
-The pipeline is composed of several key scripts:
+### Prerequisites
 
-*   `main.py`: The main orchestrator for running pipeline steps.
-*   `config_utils.py`: Handles loading of configuration from the `.env` file.
-*   `logging_utils.py`: Provides standardized logging across all scripts.
-*   `database_conn.py`: Manages DuckDB database connections.
+*   Python 3.10 or higher
+*   `uv` for package management (recommended)
 
-### Data Processing Stages
-
-1.  **`fetch_edgar_archives.py`**: Downloads bulk data ZIP archives from the SEC.
-2.  **`parse_to_parquet.py`**: Parses the raw JSON files from the archives into structured Parquet files.
-3.  **`edgar_data_loader.py`**: Loads the core EDGAR data from Parquet into the DuckDB database.
-
-### Supplementary Data Gathering
-
-*   **`stock_data_gatherer.py`**: Fetches historical stock price data.
-*   **`stock_info_gatherer.py`**: Fetches company financial statements from Yahoo Finance.
-*   **`macro_data_gatherer.py`**: Fetches macroeconomic data from FRED.
-*   **`load_supplementary_data.py`**: Loads all supplementary data from Parquet into DuckDB.
-
-### Utilities
-
-*   **`validate_edgar_db.py`**: Runs a series of checks to validate data integrity in the database.
-*   **`cleanup_artifacts.py`**: Removes intermediate files (JSON, Parquet, cache) to free up disk space.
-
-## Setup and Installation
+### Installation
 
 1.  **Clone the Repository**:
     ```bash
@@ -75,6 +55,19 @@ The pipeline is composed of several key scripts:
     *   `DB_FILE`: The absolute path for the DuckDB database file (e.g., `C:\path\to\data\edgar_analytics.duckdb`).
     *   `SEC_USER_AGENT`: A descriptive User-Agent for making requests to the SEC (e.g., `YourName YourOrg your.email@example.com`). **This is required by the SEC.**
     *   `FRED_API_KEY`: Your API key for the FRED service (optional, if using `gather-macro`).
+
+## Project Structure
+
+The project is organized into the following directories:
+
+*   `main.py`: The main orchestrator for running pipeline steps.
+*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Yahoo Finance, FRED).
+*   `data_processing/`: Scripts for parsing, cleaning, and loading data into the database.
+*   `analysis/`: Scripts and notebooks for analyzing the data.
+*   `utils/`: Utility scripts for configuration, logging, and database connections.
+*   `scripts/`: Standalone scripts for tasks like cleanup.
+*   `logs/`: Directory for log files.
+*   `DATA_DICTIONARY.md`: A detailed description of all database tables, columns, and their relationships.
 
 ## Usage
 
@@ -112,7 +105,7 @@ python main.py cleanup --all
 
 ## Database Schema
 
-For a detailed description of all database tables, columns, and their relationships, please see the **Data Dictionary**.
+For a detailed description of all database tables, columns, and their relationships, please see the [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
 
 ## Contributing
 

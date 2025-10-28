@@ -12,9 +12,16 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 from typing import List, Optional, Dict, Any, Tuple, Union
+import sys
+
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
 
 # --- Import Utilities ---
-from database_conn import get_db_connection
+from utils.database_conn import get_db_connection
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
