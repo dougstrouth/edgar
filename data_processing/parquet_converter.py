@@ -117,3 +117,56 @@ def process_batch_to_parquet(batch_data: Dict[str, List[Dict]], parquet_dir: Pat
             df_facts_all = _prepare_df_for_storage(df_facts_all, str_cols=str_cols, date_cols=date_cols, numeric_cols=numeric_cols, int_cols=int_cols)
             df_facts_all.drop(columns=['period_start_date'], inplace=True, errors='ignore')
             save_dataframe_to_parquet(df_facts_all, parquet_dir / "xbrl_facts")
+
+
+def get_processed_ciks(parquet_dir: Path) -> Set[str]:
+    """
+    Scans the 'companies' Parquet directory to find all CIKs that have
+    already been processed and saved.
+    """
+    processed_ciks: Set[str] = set()
+    companies_dir = parquet_dir / "companies"
+    if not companies_dir.is_dir():
+        logger.info("No existing 'companies' Parquet directory found. Starting fresh.")
+        return processed_ciks
+
+    try:
+        all_dfs = [pd.read_parquet(file_path, columns=['cik']) for file_path in companies_dir.glob("*.parquet")]
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            if 'cik' in combined_df.columns:
+                processed_ciks.update(combined_df['cik'].dropna().unique())
+    except Exception as e:
+        logger.error(f"Error reading processed CIKs from {companies_dir}: {e}. "
+                     "Consider running with FORCE_REPROCESS=true to rebuild.", exc_info=True)
+        return set()
+
+    return processed_ciks
+
+
+def get_processed_filings(parquet_dir: Path) -> Dict[str, Set[str]]:
+    """
+    Scans the 'filings' Parquet directory to find all accession numbers
+    that have already been processed, grouped by CIK.
+    """
+    processed_filings: Dict[str, Set[str]] = {}
+    filings_dir = parquet_dir / "filings"
+    if not filings_dir.is_dir():
+        logger.info("No existing 'filings' Parquet directory found. Starting fresh.")
+        return processed_filings
+
+    try:
+        all_dfs = [pd.read_parquet(file_path, columns=['cik', 'accession_number']) for file_path in filings_dir.glob("*.parquet")]
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            if 'cik' in combined_df.columns and 'accession_number' in combined_df.columns:
+                # Drop rows where 'cik' or 'accession_number' is NaN
+                combined_df.dropna(subset=['cik', 'accession_number'], inplace=True)
+                # Group by CIK and aggregate accession numbers into a set
+                processed_filings = combined_df.groupby('cik')['accession_number'].apply(set).to_dict()
+    except Exception as e:
+        logger.error(f"Error reading processed filings from {filings_dir}: {e}. "
+                     "Consider running with FORCE_REPROCESS=true to rebuild.", exc_info=True)
+        return {}
+
+    return processed_filings

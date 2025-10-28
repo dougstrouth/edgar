@@ -27,7 +27,7 @@ sys.path.append(str(PROJECT_ROOT))
 # --- Import Utilities ---
 from utils.config_utils import AppConfig
 from utils.logging_utils import setup_logging
-import utils.parquet_converter as parquet_converter
+from data_processing import parquet_converter
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem

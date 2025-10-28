@@ -42,7 +42,7 @@ from utils.config_utils import AppConfig
 import duckdb
 from utils.logging_utils import setup_logging
 from utils.database_conn import ManagedDatabaseConnection
-import utils.parquet_converter as parquet_converter
+from data_processing import parquet_converter
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem

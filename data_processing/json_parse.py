@@ -246,6 +246,10 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
                         logger.warning(f"Inconsistent array lengths in 'filings.recent' for {file_path.name}. Skipping filings.")
                     else:
                         for i in range(num_filings):
+                            accession_number = recent.get('accessionNumber', [None]*num_filings)[i]
+                            if processed_accession_numbers and accession_number in processed_accession_numbers:
+                                continue
+
                             filing_entry = {"cik": cik_padded}; valid_entry = True
                             for json_key, (db_key, converter) in FILING_FIELD_MAP.items():
                                 if json_key in recent:
@@ -306,7 +310,7 @@ def _convert_fact_value(raw_value: Any) -> Tuple[Optional[float], Optional[str]]
 
 # --- Function for Parsing CompanyFacts JSONs (Using logger) ---
 
-def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Optional[str], List[Dict]]]]:
+def parse_company_facts_json_for_db(file_path: Path, relevant_accession_numbers: Set[str] = None) -> Optional[Dict[str, Union[Optional[str], List[Dict]]]]:
     """
     Loads and parses a CIK-specific company facts JSON file (from companyfacts.zip),
     structuring output for xbrl_tags and xbrl_facts tables.
@@ -455,4 +459,5 @@ if __name__ == "__main__":
         else: logger.warning(f"Example companyfacts JSON not found: {EXAMPLE_COMPANYFACTS_JSON_PATH}. Skipping.")
 
     logger.info("\n--- NOTE: This script only parses. Run edgar_data_loader.py to load to DB. ---")
+    logger.info("--- EDGAR Data Parser Finished (Example Mode) ---")s. Run edgar_data_loader.py to load to DB. ---")
     logger.info("--- EDGAR Data Parser Finished (Example Mode) ---")

@@ -41,7 +41,7 @@ sys.path.append(str(PROJECT_ROOT))
 from utils.config_utils import AppConfig                 # Import configuration loader
 from utils.logging_utils import setup_logging            # Import logging setup function
 from utils.database_conn import ManagedDatabaseConnection
-import utils.parquet_converter as parquet_converter # Reuse the parquet saving utility
+from data_processing import parquet_converter # Reuse the parquet saving utility
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem
@@ -377,8 +377,9 @@ def run_stock_data_pipeline(
             'threads': os.cpu_count(),
             'memory_limit': '4GB'
         }
-        if config.DUCKDB_TEMP_DIR:
-            write_pragmas['temp_directory'] = config.DUCKDB_TEMP_DIR
+        duckdb_temp_dir = config.get_optional_var("DUCKDB_TEMP_DIR")
+        if duckdb_temp_dir:
+            write_pragmas['temp_directory'] = duckdb_temp_dir
 
         # --- Cleanliness Step for Parquet directories ---
         if mode == 'full_refresh':
@@ -512,8 +513,19 @@ def run_stock_data_pipeline(
     logger.info(f"Data written to Parquet files in: {config.PARQUET_DIR}")
 
 
+import argparse
+
 # --- Script Execution Control ---
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Gather historical stock data using yfinance.")
+    parser.add_argument(
+        "--mode",
+        default="append",
+        choices=['initial_load', 'append', 'full_refresh'],
+        help="The run mode for the data gathering pipeline."
+    )
+    args = parser.parse_args()
+
     try:
         config = AppConfig(calling_script_path=Path(__file__))
     except SystemExit as e:
@@ -523,12 +535,9 @@ if __name__ == "__main__":
         logger.critical(f"Unexpected error loading config: {e}", exc_info=True)
         sys.exit(1)
 
-    # Example: Append using DB_FILE from config
     run_stock_data_pipeline(
         config=config,
-        mode='full_refresh', # Default mode
-        # append_start_date=config.get_optional_var("STOCK_GATHERER_APPEND_START"), # Example optional config
-        # target_tickers=None, # Or load from config/args
+        mode=args.mode,
         db_path_override=None # Use DB from config by default
     )
 

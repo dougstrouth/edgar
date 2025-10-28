@@ -27,8 +27,8 @@ sys.path.append(str(PROJECT_ROOT))
 # --- Import Utilities ---
 from utils.config_utils import AppConfig
 from utils.logging_utils import setup_logging
-import utils.json_parse as json_parse
-import utils.parquet_converter as parquet_converter
+import json_parse
+import parquet_converter
 
 # --- Constants ---
 DEFAULT_MAX_CPU_IO_WORKERS = 8
@@ -81,18 +81,8 @@ if __name__ == "__main__":
     max_parsing_workers = config.get_optional_int("MAX_CPU_IO_WORKERS", DEFAULT_MAX_CPU_IO_WORKERS)
 
     logger.info(f"--- Starting EDGAR JSON to Parquet Conversion ---")
+    config.PARQUET_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"Parquet output directory: {config.PARQUET_DIR}")
-
-    # --- Cleanliness Step: Ensure a fresh start ---
-    logger.info(f"Cleaning previous Parquet data from {config.PARQUET_DIR}...")
-    if config.PARQUET_DIR.exists():
-        try:
-            shutil.rmtree(config.PARQUET_DIR)
-            logger.info("Previous Parquet directory successfully removed.")
-        except OSError as e:
-            logger.error(f"Error removing directory {config.PARQUET_DIR}: {e}. Please remove it manually.", exc_info=True)
-            sys.exit(1)
-    logger.info("Parquet directory is clean and ready for new data.")
 
     # Load control toggles
     process_limit = config.get_optional_int("PROCESS_LIMIT", default=None)
