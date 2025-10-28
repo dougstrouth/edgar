@@ -12,10 +12,16 @@ import logging
 from pathlib import Path
 import pandas as pd
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
-from config_utils import AppConfig
-from logging_utils import setup_logging
-from edgar_analysis_functions import AnalysisClient
+from utils.config_utils import AppConfig
+from utils.logging_utils import setup_logging
+from analysis.edgar_analysis_functions import AnalysisClient
 
 def create_financial_ratios(client: AnalysisClient, cik: str) -> pd.DataFrame:
     """

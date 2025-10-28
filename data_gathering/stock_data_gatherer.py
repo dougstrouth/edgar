@@ -31,11 +31,17 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
-from config_utils import AppConfig                 # Import configuration loader
-from logging_utils import setup_logging            # Import logging setup function
-from database_conn import ManagedDatabaseConnection
-import parquet_converter # Reuse the parquet saving utility
+from utils.config_utils import AppConfig                 # Import configuration loader
+from utils.logging_utils import setup_logging            # Import logging setup function
+from utils.database_conn import ManagedDatabaseConnection
+import utils.parquet_converter as parquet_converter # Reuse the parquet saving utility
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem

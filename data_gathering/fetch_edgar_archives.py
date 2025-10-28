@@ -33,10 +33,16 @@ from typing import Optional, List, Dict, Tuple, Any # Added for type hints
 
 import duckdb # Keep original duckdb import if needed for types etc.
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
-from config_utils import AppConfig                 # Import configuration loader
-from logging_utils import setup_logging            # Import logging setup function
-from database_conn import ManagedDatabaseConnection # Import DB context manager
+from utils.config_utils import AppConfig                 # Import configuration loader
+from utils.logging_utils import setup_logging            # Import logging setup function
+from utils.database_conn import ManagedDatabaseConnection # Import DB context manager
 
 # --- Constants ---
 # SCRIPT_NAME = Path(__file__).stem (defined in __main__)

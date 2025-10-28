@@ -18,10 +18,16 @@ from pathlib import Path
 import pandas as pd
 from fredapi import Fred
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
-from config_utils import AppConfig
-from logging_utils import setup_logging
-import parquet_converter
+from utils.config_utils import AppConfig
+from utils.logging_utils import setup_logging
+import utils.parquet_converter as parquet_converter
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem

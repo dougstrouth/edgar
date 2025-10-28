@@ -12,10 +12,16 @@ import logging
 import argparse
 from pathlib import Path
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
-from config_utils import AppConfig
-from logging_utils import setup_logging
-from database_conn import ManagedDatabaseConnection
+from utils.config_utils import AppConfig
+from utils.logging_utils import setup_logging
+from utils.database_conn import ManagedDatabaseConnection
 
 # Define the schemas for the supplementary tables.
 SUPPLEMENTARY_SCHEMAS = {

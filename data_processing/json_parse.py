@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Tuple,Set # Added Tuple
 from datetime import datetime, date, timezone
 
+# --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
 # config_utils is imported only in the __main__ block for example usage
 

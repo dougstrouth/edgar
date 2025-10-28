@@ -32,9 +32,13 @@ from pathlib import Path
 import time
 from typing import Optional, List
 
-# Ensure utility modules can be found. This is generally good practice,
-# especially if the script is run from a different working directory.
-sys.path.append(str(Path(__file__).resolve().parent))
+# Ensure all subdirectories are in the Python path.
+# This allows for cleaner imports in the individual scripts.
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.append(str(PROJECT_ROOT))
+sys.path.append(str(PROJECT_ROOT / 'utils'))
+sys.path.append(str(PROJECT_ROOT / 'data_gathering'))
+sys.path.append(str(PROJECT_ROOT / 'data_processing'))
 
 try:
     # These are for the orchestrator's own logging and config awareness.
@@ -42,7 +46,7 @@ try:
     from config_utils import AppConfig
     from logging_utils import setup_logging
 except ImportError as e:
-    print(f"FATAL: Could not import utility modules. Make sure they are in the same directory or Python path: {e}", file=sys.stderr)
+    print(f"FATAL: Could not import utility modules. Ensure that the 'utils' directory is in the Python path. Error: {e}", file=sys.stderr)
     sys.exit(1)
 
 # --- Setup Logging for the orchestrator itself ---
@@ -55,20 +59,20 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 SCRIPTS = {
-    "fetch": SCRIPT_DIR / "fetch_edgar_archives.py",
-    "parse_to_parquet": SCRIPT_DIR / "parse_to_parquet.py",
-    "load": SCRIPT_DIR / "edgar_data_loader.py", # This now loads from Parquet
-    "gather_stocks": SCRIPT_DIR / "stock_data_gatherer.py",
-    "gather_info": SCRIPT_DIR / "stock_info_gatherer.py",
-    "load_stocks": SCRIPT_DIR / "load_supplementary_data.py",
-    "load_info": SCRIPT_DIR / "load_supplementary_data.py",
-    "gather_macro": SCRIPT_DIR / "macro_data_gatherer.py",
-    "load_macro": SCRIPT_DIR / "load_supplementary_data.py",
-    "gather_market_risk": SCRIPT_DIR / "market_risk_gatherer.py",
-    "load_market_risk": SCRIPT_DIR / "load_supplementary_data.py",
-    "feature_eng": SCRIPT_DIR / "feature_engineering.py",
-    "validate": SCRIPT_DIR / "validate_edgar_db.py",
-    "cleanup": SCRIPT_DIR / "cleanup_artifacts.py",
+    "fetch": SCRIPT_DIR / "data_gathering/fetch_edgar_archives.py",
+    "parse_to_parquet": SCRIPT_DIR / "data_processing/parse_to_parquet.py",
+    "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py", # This now loads from Parquet
+    "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
+    "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
+    "load_stocks": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "load_info": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "gather_macro": SCRIPT_DIR / "data_gathering/macro_data_gatherer.py",
+    "load_macro": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "gather_market_risk": SCRIPT_DIR / "data_gathering/market_risk_gatherer.py",
+    "load_market_risk": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "feature_eng": SCRIPT_DIR / "data_processing/feature_engineering.py",
+    "validate": SCRIPT_DIR / "utils/validate_edgar_db.py",
+    "cleanup": SCRIPT_DIR / "scripts/cleanup_artifacts.py",
 }
 
 def run_script(script_key: str, script_args: Optional[List[str]] = None) -> bool:
