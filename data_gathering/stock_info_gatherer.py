@@ -31,11 +31,7 @@ import yfinance as yf
 import requests
 from tqdm import tqdm
 
-# --- BEGIN: Add project root to sys.path ---
-# This allows the script to be run from anywhere and still find the utils module
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.append(str(PROJECT_ROOT))
-# --- END: Add project root to sys.path ---
+
 
 # --- Import Utilities ---
 from utils.config_utils import AppConfig

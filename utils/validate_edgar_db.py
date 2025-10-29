@@ -44,7 +44,7 @@ STOCK_TABLES = ["stock_history", "stock_fetch_errors"]
 # Tables loaded by stock_info_gatherer.py
 YF_INFO_TABLES = [
     "yf_profile_metrics", "yf_stock_actions", "yf_major_holders",
-    "yf_recommendations", "yf_info_fetch_errors"
+    "yf_recommendations", "yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"
 ]
 # Tables from macro/market sources
 ECONOMIC_TABLES = ["macro_economic_data", "market_risk_factors"]
@@ -197,6 +197,40 @@ def check_market_risk_validations(con: duckdb.DuckDBPyConnection, logger: loggin
     
     return results
 
+def check_error_tables(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
+    """Checks for the presence of errors in the fetch error tables."""
+    results = []
+    logger.info("\n=== Checking Fetch Error Tables ===")
+    error_tables = ["stock_fetch_errors", "yf_info_fetch_errors"]
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+
+    for table in error_tables:
+        if table.lower() in db_tables:
+            results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table};", f"Error Count Check: {table}", logger, warning_threshold=0))
+    return results
+
+def check_macro_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
+    """Runs various checks on the macroeconomic data."""
+    results = []
+    logger.info("\n=== Checking Macroeconomic Data Integrity ===")
+    table_name = "macro_economic_data"
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+
+    if table_name in db_tables:
+        # Check for NULLs in primary key columns
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE date IS NULL OR series_id IS NULL;", f"{table_name}: NULL PK Check", logger, expect_zero=True))
+        
+        # Check for NULLs in the value column
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE value IS NULL;", f"{table_name}: NULL Value Check", logger, expect_zero=True))
+
+        # Informational check for distinct series
+        results.append(run_validation_query(con, f"SELECT DISTINCT series_id FROM {table_name};", f"{table_name}: Distinct Series", logger))
+        
+        # Informational check for date range
+        results.append(run_validation_query(con, f"SELECT MIN(date) as min_date, MAX(date) as max_date FROM {table_name};", f"{table_name}: Date Range", logger))
+    
+    return results
+
 # --- Main Orchestration Function ---
 def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     """Runs all defined validation checks."""
@@ -207,7 +241,9 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     all_results.extend(check_yf_data_validations(con, logger)) # Add new YF checks
     all_results.extend(check_table_uniqueness(con, logger))
     all_results.extend(check_market_risk_validations(con, logger))
-    # all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
+    all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
+    all_results.extend(check_error_tables(con, logger))
+    all_results.extend(check_macro_data_validations(con, logger))
 
     # --- Summarize Results ---
     logger.info("\n=== Validation Summary ===")
@@ -242,30 +278,29 @@ def check_table_uniqueness(con: duckdb.DuckDBPyConnection, logger: logging.Logge
     """
     results = []
     logger.info("\n=== Checking Table Uniqueness ===")
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
 
-    # Check 'companies' table for duplicate CIKs
-    results.append(run_validation_query(con, """
-        SELECT COUNT(*) AS count FROM (
-            SELECT cik, COUNT(*) FROM companies GROUP BY cik HAVING COUNT(*) > 1
-        );""", "Companies: Duplicate CIKs", logger, expect_zero=True))
+    uniqueness_checks = {
+        "companies": ["cik"],
+        "tickers": ["ticker", "exchange"],
+        "filings": ["accession_number"],
+        "xbrl_tags": ["taxonomy", "tag_name"],
+        "stock_history": ["ticker", "date"],
+        "yf_income_statement": ["ticker", "report_date", "item_name"],
+        "yf_balance_sheet": ["ticker", "report_date", "item_name"],
+        "yf_cash_flow": ["ticker", "report_date", "item_name"],
+        "market_risk_factors": ["date", "factor_model"],
+    }
 
-    # Check 'tickers' table for duplicate ticker/exchange combinations (consider each unique)
-    results.append(run_validation_query(con, """
-        SELECT COUNT(*) AS count FROM (
-            SELECT ticker, exchange, COUNT(*) FROM tickers GROUP BY ticker, exchange HAVING COUNT(*) > 1
-        );""", "Tickers: Duplicate Ticker/Exchange", logger, expect_zero=True))
-
-    # Check 'filings' table for duplicate accession numbers
-    results.append(run_validation_query(con, """
-        SELECT COUNT(*) AS count FROM (
-            SELECT accession_number, COUNT(*) FROM filings GROUP BY accession_number HAVING COUNT(*) > 1
-        );""", "Filings: Duplicate Accession Numbers", logger, expect_zero=True))
-
-    # Check 'xbrl_tags' table for duplicate tag/taxonomy combinations (unlikely but good to validate)
-    results.append(run_validation_query(con, """
-        SELECT COUNT(*) AS count FROM (
-            SELECT taxonomy, tag_name, COUNT(*) FROM xbrl_tags GROUP BY taxonomy, tag_name HAVING COUNT(*) > 1
-        );""", "XBRL Tags: Duplicate Taxonomy/Tag", logger, expect_zero=True))
+    for table, pks in uniqueness_checks.items():
+        if table in db_tables:
+            pk_cols = ", ".join(pks)
+            query = f"""
+                SELECT COUNT(*) AS count FROM (
+                    SELECT {pk_cols}, COUNT(*) FROM {table} GROUP BY {pk_cols} HAVING COUNT(*) > 1
+                );
+            """
+            results.append(run_validation_query(con, query, f"{table}: Duplicate PKs ({pk_cols})", logger, expect_zero=True))
 
     return results
 
