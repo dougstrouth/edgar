@@ -22,7 +22,7 @@ import logging # Keep for level constants
 import math
 from pathlib import Path
 # from dotenv import load_dotenv # No longer needed here
-from typing import Dict, List, Any, Optional, Union, Tuple,Set # Added Tuple
+from typing import Dict, List, Any, Optional, Union, Tuple, Set # Added Tuple
 from datetime import datetime, date, timezone
 
 # --- BEGIN: Add project root to sys.path ---
@@ -147,7 +147,7 @@ def generate_api_url(template: str, cik: str, **kwargs) -> str:
 
 # --- Function for Parsing Submission JSONs (Using logger) ---
 
-def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Dict, List[Dict]]]]:
+def parse_submission_json_for_db(file_path: Path, processed_accession_numbers: Optional[Set[str]] = None) -> Optional[Dict[str, Union[Dict, List[Dict]]]]:
     """
     Loads and parses a CIK-specific submission JSON file (from submissions.zip),
     structuring output for companies, tickers, former_names, filings tables.
@@ -459,5 +459,4 @@ if __name__ == "__main__":
         else: logger.warning(f"Example companyfacts JSON not found: {EXAMPLE_COMPANYFACTS_JSON_PATH}. Skipping.")
 
     logger.info("\n--- NOTE: This script only parses. Run edgar_data_loader.py to load to DB. ---")
-    logger.info("--- EDGAR Data Parser Finished (Example Mode) ---")s. Run edgar_data_loader.py to load to DB. ---")
     logger.info("--- EDGAR Data Parser Finished (Example Mode) ---")

@@ -20,8 +20,7 @@ Usage:
       python main.py cleanup
       python main.py validate
 
-This script assumes all other project scripts (fetch_edgar_archives.py,
-edgar_data_loader.py, etc.) are in the same directory.
+
 """
 
 import argparse

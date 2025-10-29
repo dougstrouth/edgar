@@ -164,12 +164,24 @@ def _process_financial_statement(statement_df: pd.DataFrame, ticker: str) -> pd.
     if statement_df is None or statement_df.empty:
         return pd.DataFrame()
     try:
-        statement_df = statement_df.transpose() # Dates become columns, items become rows
+        statement_df = statement_df.transpose() # Dates become index, items become columns
         statement_df.reset_index(inplace=True)
-        statement_df.rename(columns={'index': 'item_name'}, inplace=True)
-        melted_df = statement_df.melt(id_vars=['item_name'], var_name='report_date', value_name='item_value')
+        statement_df.rename(columns={'index': 'report_date'}, inplace=True) # The index is the date
+
+        # Coerce to datetime and drop rows that couldn't be parsed.
+        statement_df['report_date'] = pd.to_datetime(statement_df['report_date'], errors='coerce')
+        statement_df.dropna(subset=['report_date'], inplace=True)
+
+        if statement_df.empty:
+            logger.warning(f"No valid dates found in financial statement for {ticker} after cleaning.")
+            return pd.DataFrame()
+
+        melted_df = statement_df.melt(id_vars=['report_date'], var_name='item_name', value_name='item_value')
         melted_df['ticker'] = ticker
-        melted_df['report_date'] = pd.to_datetime(melted_df['report_date']).dt.date
+        
+        # report_date is already a datetime object, just need to get the date part
+        melted_df['report_date'] = melted_df['report_date'].dt.date
+        
         melted_df.dropna(subset=['item_value'], inplace=True)
         return melted_df[['ticker', 'report_date', 'item_name', 'item_value']]
     except Exception as e:
