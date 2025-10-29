@@ -18,6 +18,11 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 
 from tqdm import tqdm
 
+# --- BEGIN: Add project root to sys.path ---
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+# --- END: Add project root to sys.path ---
+
 # --- Import Utilities ---
 from utils.config_utils import AppConfig
 from utils.logging_utils import setup_logging
@@ -46,10 +51,15 @@ def parse_cik_data_worker(cik: str, submissions_dir: Path, companyfacts_dir: Pat
         parsed_submission = json_parse.parse_submission_json_for_db(submission_json_path)
         if parsed_submission:
             parsed_data_for_cik.update(parsed_submission)
+            # Create a set of accession numbers from the successfully parsed filings
+            relevant_accession_numbers = {f['accession_number'] for f in parsed_submission.get("filings", [])}
+        else:
+            relevant_accession_numbers = set()
 
     if companyfacts_json_path.is_file():
         parsed_data_for_cik["found_any_file"] = True
-        parsed_facts = json_parse.parse_company_facts_json_for_db(companyfacts_json_path)
+        # Pass the set of relevant accession numbers to the facts parser
+        parsed_facts = json_parse.parse_company_facts_json_for_db(companyfacts_json_path, relevant_accession_numbers=relevant_accession_numbers)
         if parsed_facts:
             parsed_data_for_cik["company_entity_name"] = parsed_facts.get("company_entity_name")
             parsed_data_for_cik["xbrl_tags"].extend(parsed_facts.get("xbrl_tags", []))

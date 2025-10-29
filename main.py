@@ -133,7 +133,7 @@ def main():
         default="all",
         choices=[
             "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
-            "gather_stocks", "load_stocks", "gather_info", "load_info", "gather_macro", "load_macro",
+            "gather_info", "load_info", "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
@@ -156,11 +156,6 @@ def main():
             ("parse_to_parquet", None, None),
             ("load", None, None),
             ("validate", None, None),
-            ("gather_stocks", ["--mode", "full_refresh"], 3600),
-            ("load_stocks", ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers", "--full-refresh"], None),
-            ("validate", None, None),
-            ("gather_info", None, 3600),
-            ("load_info", ["yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow", "--full-refresh"], None),
             ("validate", None, None),
             ("gather_macro", None, None),
             ("load_macro", ["macro_economic_data", "--full-refresh"], None),
@@ -184,8 +179,6 @@ def main():
         final_args = remaining_args
         if script_key == "load_macro":
             final_args = ["macro_economic_data"] + remaining_args
-        elif script_key == "load_stocks":
-            final_args = ["stock_history", "stock_fetch_errors", "yf_untrackable_tickers"] + remaining_args
         elif script_key == "load_info":
             final_args = ["yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"] + remaining_args
         elif script_key == "load_market_risk":

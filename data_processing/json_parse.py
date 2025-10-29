@@ -387,8 +387,22 @@ def parse_company_facts_json_for_db(file_path: Path, relevant_accession_numbers:
                             "filed_date": parse_date_string(fact.get('filed')),
                             "frame": str(frame_val) if frame_val is not None else None
                         }
-                        if not fact_record["accession_number"]: logger.debug(f"Skip fact missing accn: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, End {fact.get('end')}"); continue
-                        if not fact_record["form"]: logger.debug(f"Skip fact missing form: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, Accn {accession_number}"); continue
+                        if not fact_record["accession_number"]:
+                            logger.debug(f"Skip fact missing accn: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, End {fact.get('end')}")
+                            continue
+                        
+                        # --- BEGIN: FIX for Orphaned Facts ---
+                        # If a set of relevant accession numbers is provided, only process facts
+                        # that belong to one of those filings. This prevents orphaned facts when a
+                        # filing from submissions.json was skipped, but its facts are present here.
+                        if relevant_accession_numbers and accession_number not in relevant_accession_numbers:
+                            logger.debug(f"Skip fact with irrelevant accn: CIK {cik_padded}, Accn {accession_number}")
+                            continue
+                        # --- END: FIX for Orphaned Facts ---
+
+                        if not fact_record["form"]:
+                            logger.debug(f"Skip fact missing form: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, Accn {accession_number}")
+                            continue
 
                         parsed_db_data["xbrl_facts"].append(fact_record)
 
