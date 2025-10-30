@@ -61,8 +61,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 SCRIPTS = {
     "fetch": SCRIPT_DIR / "data_gathering/fetch_edgar_archives.py",
-    "parse_to_parquet": SCRIPT_DIR / "data_processing/parse_to_parquet.py",
-    "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py", # This now loads from Parquet
+    "json_to_duckdb": SCRIPT_DIR / "data_processing/json_to_duckdb.py",
+    "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
     "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
     "load_stocks": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
