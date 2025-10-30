@@ -23,11 +23,11 @@
             "justMyCode": true
         },
         {
-            "name": "Debug CLI: parse-to-parquet",
+            "name": "Debug CLI: json_to_duckdb",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
-            "args": ["parse-to-parquet"],
+            "args": ["json_to_duckdb"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -99,6 +99,14 @@
             "type": "python",
             "request": "launch",
             "program": ""
+        },
+        {
+            "name": "Debug Script: check_json_parsing",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/check_json_parsing.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
         },
         {
             "name": "Debug Script: gather-stocks",

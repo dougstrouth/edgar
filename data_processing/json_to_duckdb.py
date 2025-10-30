@@ -15,13 +15,10 @@ manipulation capabilities.
 import sys
 import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import duckdb
 from tqdm import tqdm
 
 # --- BEGIN: Add project root to sys.path ---
+# This allows the script to be run from anywhere and still find the utils module
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 # --- END: Add project root to sys.path ---
@@ -29,67 +26,40 @@ sys.path.append(str(PROJECT_ROOT))
 # --- Import Utilities ---
 from utils.config_utils import AppConfig
 from utils.logging_utils import setup_logging
-from utils.database_conn import DuckDBConnection
-from data_processing import json_parse
+from utils.database_conn import ManagedDatabaseConnection as DuckDBConnection
 
-# --- Constants ---
-DEFAULT_MAX_CPU_IO_WORKERS = 8
 
-# --- Worker function for parallel parsing ---
-def parse_cik_data_worker(cik: str, submissions_dir: Path, companyfacts_dir: Path) -> Optional[Dict[str, Any]]:
-    """
-    Worker function to parse JSON files for a single CIK.
-    Returns a dictionary of parsed data or None if no files found/parsed.
-    """
-    submission_json_path = submissions_dir / f"CIK{cik}.json"
-    companyfacts_json_path = companyfacts_dir / f"CIK{cik}.json"
+from data_processing.edgar_data_loader import SCHEMA
 
-    parsed_data_for_cik = {
-        "cik": cik, "companies": None, "tickers": [], "former_names": [], "filings": [],
-        "xbrl_tags": [], "xbrl_facts": [], "company_entity_name": None, "found_any_file": False
-    }
+# Define TABLE_NAMES from the SCHEMA keys
+TABLE_NAMES = [name for name in SCHEMA.keys() if name != "indexes"]
 
-    if submission_json_path.is_file():
-        parsed_data_for_cik["found_any_file"] = True
-        parsed_submission = json_parse.parse_submission_json_for_db(submission_json_path)
-        if parsed_submission:
-            parsed_data_for_cik.update(parsed_submission)
-            relevant_accession_numbers = {f['accession_number'] for f in parsed_submission.get("filings", [])}
-        else:
-            relevant_accession_numbers = set()
 
-    if companyfacts_json_path.is_file():
-        parsed_data_for_cik["found_any_file"] = True
-        parsed_facts = json_parse.parse_company_facts_json_for_db(companyfacts_json_path, relevant_accession_numbers=relevant_accession_numbers)
-        if parsed_facts:
-            parsed_data_for_cik["company_entity_name"] = parsed_facts.get("company_entity_name")
-            parsed_data_for_cik["xbrl_tags"].extend(parsed_facts.get("xbrl_tags", []))
-            parsed_data_for_cik["xbrl_facts"].extend(parsed_facts.get("xbrl_facts", []))
 
-    return parsed_data_for_cik if parsed_data_for_cik["found_any_file"] else None
 
-def load_batch_to_duckdb(db_con: duckdb.DuckDBPyConnection, batch_data: Dict[str, List[Dict]], logger: logging.Logger):
-    """
-    Loads a batch of aggregated data into temporary tables in DuckDB.
-    """
-    try:
-        # Use a single transaction for the batch insertion
-        with db_con.cursor() as con:
-            for table_name, records in batch_data.items():
-                if records:
-                    # Dynamically create the table if it doesn't exist
-                    # This is simplified; a more robust solution would define table structures
-                    con.execute(f"CREATE TABLE IF NOT EXISTS temp_{table_name} (data JSON);")
-                    # Insert each record as a JSON string
-                    for record in records:
-                        con.execute(f"INSERT INTO temp_{table_name} VALUES (json(?));", [json_parse.dumps(record)])
-            logger.info(f"Successfully loaded batch into temp tables: {', '.join(batch_data.keys())}")
-    except Exception as e:
-        logger.error(f"Error loading batch to DuckDB: {e}", exc_info=True)
-        raise
+
+import argparse
 
 # --- Main Loading Logic ---
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Parse SEC EDGAR JSON files and load into DuckDB.")
+    parser.add_argument(
+        "--cik",
+        type=str,
+        default=None,
+        help="Process only a specific CIK (Central Index Key).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of CIKs to process.",
+    )
+    args = parser.parse_args()
+
+    process_specific_cik = args.cik
+    process_limit = args.limit
+
     try:
         config = AppConfig(calling_script_path=Path(__file__))
     except SystemExit as e:
@@ -98,100 +68,225 @@ if __name__ == "__main__":
 
     SCRIPT_NAME = Path(__file__).stem
     LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
+
     logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
-    logging.getLogger(json_parse.__name__).setLevel(logging.WARNING)
 
-    max_parsing_workers = config.get_optional_int("MAX_CPU_IO_WORKERS", DEFAULT_MAX_CPU_IO_WORKERS)
 
-    logger.info("--- Starting EDGAR JSON to DuckDB Direct Loading ---")
 
-    # Load control toggles
-    process_limit = config.get_optional_int("PROCESS_LIMIT", default=None)
-    process_specific_cik = config.get_optional_var("PROCESS_SPECIFIC_CIK", default=None)
-    cik_batch_size = config.get_optional_int("CIK_BATCH_SIZE", default=100)
 
-    # --- 1. Get CIK List ---
-    logger.info("--- Running Task: Prepare CIKs ---")
-    ticker_data = json_parse.load_ticker_data(config.TICKER_FILE_PATH)
-    if not ticker_data:
-        logger.critical("Failed to load ticker data. Exiting.")
+    # --- Establish DuckDB Connection and Create Temp Tables ---
+    try:
+        with DuckDBConnection(db_path_override=config.DB_FILE_STR) as db_conn:
+            if db_conn is None:
+                raise ConnectionError(f"Failed to establish database connection to {config.DB_FILE_STR}")
+            logger.info("Successfully connected to DuckDB for bulk loading.")
+
+            # Create temporary tables based on SCHEMA for direct insertion
+            for table_name in TABLE_NAMES:
+                # Extract the CREATE TABLE statement, modify it for a temp table
+                create_sql = SCHEMA[table_name].replace(f"CREATE TABLE IF NOT EXISTS {table_name}", f"CREATE TEMPORARY TABLE IF NOT EXISTS temp_{table_name}")
+
+                db_conn.execute(create_sql)
+                logger.info(f"Created temporary table: temp_{table_name}")
+
+            # --- 1. Get CIK List ---
+
+
+            # --- Get CIK List ---
+            if process_specific_cik:
+                ciks_to_process = [str(process_specific_cik)]
+                logger.info(f"Processing only specified CIK: {ciks_to_process}")
+            else:
+                logger.info(f"Scanning for CIKs in {config.SUBMISSIONS_DIR}...")
+                all_ciks = sorted([p.stem.replace('CIK', '') for p in config.SUBMISSIONS_DIR.glob("CIK*.json")])
+                if process_limit:
+                    ciks_to_process = all_ciks[:process_limit]
+                    logger.warning(f"PROCESS_LIMIT set to {process_limit}. Processing only the first {len(ciks_to_process)} of {len(all_ciks)} total CIKs.")
+                else:
+                    ciks_to_process = all_ciks
+                    logger.info(f"Found {len(ciks_to_process)} CIKs to process.")
+
+            if not ciks_to_process:
+                logger.warning("No CIKs found to process. Exiting.")
+                sys.exit(0)
+
+            # --- 2. Process CIKs and Load to Temp Tables using read_json ---
+            logger.info(f"Processing {len(ciks_to_process)} CIKs...")
+
+            submission_json_files = [str(config.SUBMISSIONS_DIR / f"CIK{cik}.json") for cik in ciks_to_process]
+            companyfacts_json_files = [str(config.COMPANYFACTS_DIR / f"CIK{cik}.json") for cik in ciks_to_process]
+
+            # Filter out files that don't exist
+            submission_json_files = [f for f in submission_json_files if Path(f).is_file()]
+            companyfacts_json_files = [f for f in companyfacts_json_files if Path(f).is_file()]
+
+            if not submission_json_files:
+                logger.warning("No submission JSON files found to process.")
+            else:
+                # --- Load Companies ---
+                logger.info("Loading data into temp_companies...")
+                db_conn.execute(f'''
+                    INSERT INTO temp_companies (cik, entity_type, sic, sic_description, ein, description, state_of_incorporation, fiscal_year_end, phone, flags, primary_name)
+                    SELECT
+                        regexp_extract(filename, 'CIK(\d+)\.json', 1) AS cik,
+                        entityType,
+                        sic,
+                        sicDescription,
+                        ein,
+                        description,
+                        stateOfincorporation,
+                        fiscalYearEnd,
+                        phone,
+                        flags,
+                        name AS primary_name
+                    FROM read_json({submission_json_files},
+                        auto_detect=true,
+                        columns={{
+                            'entityType': 'VARCHAR', 'sic': 'VARCHAR', 'sicDescription': 'VARCHAR',
+                            'ein': 'VARCHAR', 'description': 'VARCHAR', 'stateOfIncorporation': 'VARCHAR',
+                            'fiscalYearEnd': 'VARCHAR', 'phone': 'VARCHAR', 'flags': 'VARCHAR', 'name': 'VARCHAR',
+                            'filename': 'VARCHAR'
+                        }}
+                    )
+                    WHERE regexp_extract(filename, 'CIK(\d+)\.json', 1) IS NOT NULL;
+                ''')
+                logger.info("Finished loading data into temp_companies.")
+
+                # --- Load Tickers ---
+                logger.info("Loading data into temp_tickers...")
+                db_conn.execute(f'''
+                    INSERT INTO temp_tickers (cik, ticker, exchange, source)
+                    SELECT
+                        cik,
+                        t.ticker,
+                        t.exchange,
+                        'submission' as source
+                    FROM read_json({submission_json_files},
+                        auto_detect=true,
+                        columns={{'cik': 'VARCHAR', 'tickers': 'STRUCT(ticker VARCHAR, exchange VARCHAR)[]'}}
+                    ), UNNEST(tickers) AS t(ticker, exchange);
+                ''')
+                logger.info("Finished loading data into temp_tickers.")
+
+                # --- Load Former Names ---
+                logger.info("Loading data into temp_former_names...")
+                db_conn.execute(f'''
+                    INSERT INTO temp_former_names (cik, former_name, date_from, date_to)
+                    SELECT
+                        cik,
+                        name AS former_name,
+                        "from" AS date_from,
+                        "to" AS date_to
+                    FROM read_json({submission_json_files},
+                        auto_detect=true,
+                        columns={{'cik': 'VARCHAR', 'formerNames': 'STRUCT(name VARCHAR, "from" VARCHAR, "to" VARCHAR)[]'}}
+                    ), UNNEST(formerNames) AS fn(name, "from", "to");
+                ''')
+                logger.info("Finished loading data into temp_former_names.")
+
+                # --- Load Filings ---
+                logger.info("Loading data into temp_filings...")
+                db_conn.execute(f'''
+                    INSERT INTO temp_filings (accession_number, cik, filing_date, report_date, acceptance_datetime, form, file_number, film_number, items, size, is_xbrl, is_inline_xbrl, primary_document, primary_doc_description)
+                    SELECT
+                        accessionNumber,
+                        cik,
+                        filingDate,
+                        reportDate,
+                        acceptanceDatetime,
+                        form,
+                        fileNumber,
+                        filmNumber,
+                        items,
+                        size,
+                        isXBRL,
+                        isInlineXBRL,
+                        primaryDocument,
+                        primaryDocDescription
+                    FROM read_json({submission_json_files},
+                        json_format='auto',
+                        columns={{
+                            'cik': 'VARCHAR',
+                            'filings': 'STRUCT(recent STRUCT(accessionNumber VARCHAR[], filingDate DATE[], reportDate DATE[], acceptanceDatetime TIMESTAMPTZ[], act VARCHAR[], form VARCHAR[], fileNumber VARCHAR[], filmNumber VARCHAR[], items VARCHAR[], size BIGINT[], isXBRL BOOLEAN[], isInlineXBRL BOOLEAN[], primaryDocument VARCHAR[], primaryDocDescription VARCHAR[]))'
+                        }}
+                    ),
+                    UNNEST(filings.recent.accessionNumber, filings.recent.filingDate, filings.recent.reportDate, filings.recent.acceptanceDatetime, filings.recent.act, filings.recent.form, filings.recent.fileNumber, filings.recent.filmNumber, filings.recent.items, filings.recent.size, filings.recent.isXBRL, filings.recent.isInlineXBRL, filings.recent.primaryDocument, filings.recent.primaryDocDescription)
+                    AS t(accessionNumber, filingDate, reportDate, acceptanceDatetime, act, form, fileNumber, filmNumber, items, size, isXBRL, isInlineXBRL, primaryDocument, primaryDocDescription);
+                ''')
+                logger.info("Finished loading data into temp_filings.")
+
+            if not companyfacts_json_files:
+                logger.warning("No companyfacts JSON files found to process.")
+            else:
+                # --- Load XBRL Tags ---
+                logger.info("Loading data into temp_xbrl_tags...")
+                db_conn.execute(f'''
+                    INSERT INTO temp_xbrl_tags (taxonomy, tag_name, label, description)
+                    SELECT DISTINCT
+                        taxonomy_entry.key AS taxonomy,
+                        tag_entry.key AS tag_name,
+                        tag_entry.value.label AS label,
+                        tag_entry.value.description AS description
+                    FROM read_json({companyfacts_json_files},
+                        auto_detect=true,
+                        columns={{'facts': 'JSON'}}
+                    ),
+                    UNNEST(JSON_EACH(facts)) AS taxonomy_entry,
+                    UNNEST(JSON_EACH(taxonomy_entry.value)) AS tag_entry;
+                ''');
+                logger.info("Finished loading data into temp_xbrl_tags.")
+
+                # --- Load XBRL Facts ---
+                logger.info("Loading data into temp_xbrl_facts...")
+                db_conn.execute(f'''
+                    INSERT INTO temp_xbrl_facts (cik, accession_number, taxonomy, tag_name, unit, period_end_date, value_numeric, value_text, fy, fp, form, filed_date, frame)
+                    SELECT
+                        cik,
+                        fact_item.accn AS accession_number,
+                        taxonomy_entry.key AS taxonomy,
+                        tag_entry.key AS tag_name,
+                        unit_key AS unit,
+                        fact_item.end AS period_end_date,
+                        fact_item.val AS value_numeric,
+                        fact_item.val::VARCHAR AS value_text,
+                        fact_item.fy AS fy,
+                        fact_item.fp AS fp,
+                        fact_item.form AS form,
+                        fact_item.filed AS filed_date,
+                        fact_item.frame AS frame
+                    FROM read_json({companyfacts_json_files},
+                        auto_detect=true,
+                        columns={{'cik': 'VARCHAR', 'facts': 'JSON'}}
+                    ),
+                    UNNEST(JSON_EACH(facts)) AS taxonomy_entry,
+                    UNNEST(JSON_EACH(taxonomy_entry.value)) AS tag_entry,
+                    UNNEST(JSON_KEYS(tag_entry.value.units)) AS unit_key,
+                    UNNEST(JSON_EXTRACT(tag_entry.value.units, CONCAT('$.', unit_key))) AS fact_item;
+                ''');
+                logger.info("Finished loading data into temp_xbrl_facts.")
+
+                # Update entity_name_cf in temp_companies from companyfacts
+                logger.info("Updating entity_name_cf in temp_companies from companyfacts...")
+                db_conn.execute(f'''
+                    UPDATE temp_companies
+                    SET entity_name_cf = cf.entity_name_cf
+                    FROM (
+                        SELECT
+                            cik,
+                            entityName AS entity_name_cf
+                        FROM read_json({companyfacts_json_files},
+                            auto_detect=true,
+                            columns={{'cik': 'VARCHAR', 'entityName': 'VARCHAR'}}
+                        )
+                    ) AS cf
+                    WHERE temp_companies.cik = cf.cik;
+                ''')
+                logger.info("Finished updating entity_name_cf in temp_companies.")
+
+            logger.info(f"Finished processing CIKs.")
+
+    except Exception as e:
+        logger.critical(f"An error occurred during JSON to DuckDB loading: {e}", exc_info=True)
         sys.exit(1)
-    all_ciks = json_parse.extract_formatted_ciks(ticker_data)
-    if not all_ciks:
-        logger.critical("No CIKs extracted. Exiting.")
-        sys.exit(1)
 
-    # --- Determine CIKs to process ---
-    ciks_to_process = []
-    if process_specific_cik:
-        ciks_to_process = [process_specific_cik.zfill(10)]
-        logger.warning(f"--- Processing SPECIFIC CIK: {ciks_to_process[0]} ---")
-    elif process_limit:
-        ciks_to_process = all_ciks[:process_limit]
-        logger.warning(f"--- Processing LIMITED set: First {process_limit} CIKs ---")
-    else:
-        ciks_to_process = all_ciks
-        logger.info(f"--- Processing ALL {len(all_ciks)} CIKs ---")
-
-    if not ciks_to_process:
-        logger.error("No CIKs selected for processing. Exiting.")
-        sys.exit(1)
-
-    # --- 2. Parse and Load in Batches ---
-    total_processed_ciks = 0
-    skipped_ciks_count = 0
-    run_unique_tags: Set[Tuple[Optional[str], Optional[str]]] = set()
-
-    with DuckDBConnection(db_path=config.DUCKDB_PATH) as db_conn:
-        logger.info("Successfully connected to DuckDB.")
-        # Clean up any previous temporary tables
-        for table in ['companies', 'tickers', 'former_names', 'filings', 'xbrl_tags', 'xbrl_facts']:
-            db_conn.execute(f"DROP TABLE IF EXISTS temp_{table};")
-        logger.info("Cleaned up old temporary tables.")
-
-        with ThreadPoolExecutor(max_workers=max_parsing_workers) as parsing_executor:
-            parsing_jobs = [(cik, config.SUBMISSIONS_DIR, config.COMPANYFACTS_DIR) for cik in ciks_to_process]
-            parsed_results_queue = []
-
-            future_to_cik = {parsing_executor.submit(parse_cik_data_worker, *job): job[0] for job in parsing_jobs}
-
-            for future in tqdm(as_completed(future_to_cik), total=len(ciks_to_process), desc="Parsing CIK JSONs"):
-                cik = future_to_cik[future]
-                try:
-                    parsed_data = future.result()
-                    if parsed_data:
-                        parsed_results_queue.append(parsed_data)
-                        total_processed_ciks += 1
-                    else:
-                        skipped_ciks_count += 1
-                except Exception as exc:
-                    logger.error(f"Error parsing CIK {cik}: {exc}", exc_info=True)
-                    skipped_ciks_count += 1
-
-                is_last_item = total_processed_ciks + skipped_ciks_count == len(ciks_to_process)
-                if parsed_results_queue and (len(parsed_results_queue) >= cik_batch_size or (is_last_item and parsed_results_queue)):
-                    logger.info(f"Batch of {len(parsed_results_queue)} parsed CIKs ready for DB loading...")
-
-                    batch_aggregated_data: Dict[str, List[Dict]] = { "companies": [], "tickers": [], "former_names": [], "filings": [], "xbrl_tags": [], "xbrl_facts": [] }
-                    for item in parsed_results_queue:
-                        if item.get("companies"): batch_aggregated_data["companies"].append(item["companies"])
-                        batch_aggregated_data["tickers"].extend(item.get("tickers", []))
-                        batch_aggregated_data["former_names"].extend(item.get("former_names", []))
-                        batch_aggregated_data["filings"].extend(item.get("filings", []))
-                        batch_aggregated_data["xbrl_facts"].extend(item.get("xbrl_facts", []))
-                        for tag_dict in item.get("xbrl_tags", []):
-                            tag_key = (tag_dict.get("taxonomy"), tag_dict.get("tag_name"))
-                            if all(tag_key) and tag_key not in run_unique_tags:
-                                batch_aggregated_data["xbrl_tags"].append(tag_dict)
-                                run_unique_tags.add(tag_key)
-                        if item.get("company_entity_name"):
-                            for comp_rec in batch_aggregated_data["companies"]:
-                                if comp_rec.get("cik") == item["cik"]:
-                                    comp_rec["entity_name_cf"] = item["company_entity_name"]
-                                    break
-                    
-                    load_batch_to_duckdb(db_conn, batch_aggregated_data, logger)
-                    parsed_results_queue = []
-
-    logger.info(f"Finished parsing and loading. Processed {total_processed_ciks} CIKs. Skipped {skipped_ciks_count} CIKs.")
     logger.info("--- EDGAR JSON to DuckDB Direct Loading Finished ---")

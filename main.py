@@ -132,7 +132,7 @@ def main():
         nargs="?",
         default="all",
         choices=[
-            "all", "fetch", "parse_to_parquet", "load", "validate", "cleanup", "feature_eng",
+            "all", "fetch", "json_to_duckdb", "load", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk"
         ],
@@ -153,7 +153,7 @@ def main():
         # Run cleanup at the end to free up space
         pipeline_steps_with_args = [
             ("fetch", None, None),
-            ("parse_to_parquet", None, None),
+            ("json_to_duckdb", None, None),
             ("load", None, None),
             ("validate", None, None),
             ("validate", None, None),
