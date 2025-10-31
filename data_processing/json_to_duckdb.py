@@ -80,6 +80,9 @@ if __name__ == "__main__":
             if db_conn is None:
                 raise ConnectionError(f"Failed to establish database connection to {config.DB_FILE_STR}")
             logger.info("Successfully connected to DuckDB for bulk loading.")
+            db_conn.execute("INSTALL json;")
+            db_conn.execute("LOAD json;")
+            db_conn.execute("SET memory_limit = '16GB';")
 
             # Create temporary tables based on SCHEMA for direct insertion
             for table_name in TABLE_NAMES:
@@ -157,14 +160,18 @@ if __name__ == "__main__":
                 db_conn.execute(f'''
                     INSERT INTO temp_tickers (cik, ticker, exchange, source)
                     SELECT
-                        cik,
-                        t.ticker,
-                        t.exchange,
+                        regexp_extract(filename, 'CIK(\d+)\.json', 1) AS cik,
+                        t.value->'ticker'::VARCHAR AS ticker,
+                        t.value->'exchange'::VARCHAR AS exchange,
                         'submission' as source
                     FROM read_json({submission_json_files},
                         auto_detect=true,
-                        columns={{'cik': 'VARCHAR', 'tickers': 'STRUCT(ticker VARCHAR, exchange VARCHAR)[]'}}
-                    ), UNNEST(tickers) AS t(ticker, exchange);
+                        columns={{
+                            'tickers': 'JSON[]',
+                            'filename': 'VARCHAR'
+                        }}
+                    ), UNNEST(tickers) AS t(value)
+                    WHERE regexp_extract(filename, 'CIK(\d+)\.json', 1) IS NOT NULL;
                 ''')
                 logger.info("Finished loading data into temp_tickers.")
 
@@ -173,14 +180,18 @@ if __name__ == "__main__":
                 db_conn.execute(f'''
                     INSERT INTO temp_former_names (cik, former_name, date_from, date_to)
                     SELECT
-                        cik,
-                        name AS former_name,
-                        "from" AS date_from,
-                        "to" AS date_to
+                        regexp_extract(filename, 'CIK(\d+)\.json', 1) AS cik,
+                        fn.value->'name'::VARCHAR AS former_name,
+                        JSON_EXTRACT(fn.value, '$.from')::VARCHAR::TIMESTAMPTZ AS date_from,
+                        JSON_EXTRACT(fn.value, '$.to')::VARCHAR::TIMESTAMPTZ AS date_to
                     FROM read_json({submission_json_files},
                         auto_detect=true,
-                        columns={{'cik': 'VARCHAR', 'formerNames': 'STRUCT(name VARCHAR, "from" VARCHAR, "to" VARCHAR)[]'}}
-                    ), UNNEST(formerNames) AS fn(name, "from", "to");
+                        columns={{
+                            'formerNames': 'JSON[]',
+                            'filename': 'VARCHAR'
+                        }}
+                    ), UNNEST(formerNames) AS fn(value)
+                    WHERE regexp_extract(filename, 'CIK(\d+)\.json', 1) IS NOT NULL;
                 ''')
                 logger.info("Finished loading data into temp_former_names.")
 
@@ -189,99 +200,99 @@ if __name__ == "__main__":
                 db_conn.execute(f'''
                     INSERT INTO temp_filings (accession_number, cik, filing_date, report_date, acceptance_datetime, form, file_number, film_number, items, size, is_xbrl, is_inline_xbrl, primary_document, primary_doc_description)
                     SELECT
-                        accessionNumber,
-                        cik,
-                        filingDate,
-                        reportDate,
-                        acceptanceDatetime,
-                        form,
-                        fileNumber,
-                        filmNumber,
-                        items,
-                        size,
-                        isXBRL,
-                        isInlineXBRL,
-                        primaryDocument,
-                        primaryDocDescription
-                    FROM read_json({submission_json_files},
-                        json_format='auto',
-                        columns={{
-                            'cik': 'VARCHAR',
-                            'filings': 'STRUCT(recent STRUCT(accessionNumber VARCHAR[], filingDate DATE[], reportDate DATE[], acceptanceDatetime TIMESTAMPTZ[], act VARCHAR[], form VARCHAR[], fileNumber VARCHAR[], filmNumber VARCHAR[], items VARCHAR[], size BIGINT[], isXBRL BOOLEAN[], isInlineXBRL BOOLEAN[], primaryDocument VARCHAR[], primaryDocDescription VARCHAR[]))'
-                        }}
-                    ),
-                    UNNEST(filings.recent.accessionNumber, filings.recent.filingDate, filings.recent.reportDate, filings.recent.acceptanceDatetime, filings.recent.act, filings.recent.form, filings.recent.fileNumber, filings.recent.filmNumber, filings.recent.items, filings.recent.size, filings.recent.isXBRL, filings.recent.isInlineXBRL, filings.recent.primaryDocument, filings.recent.primaryDocDescription)
-                    AS t(accessionNumber, filingDate, reportDate, acceptanceDatetime, act, form, fileNumber, filmNumber, items, size, isXBRL, isInlineXBRL, primaryDocument, primaryDocDescription);
+                        regexp_extract(filename, 'CIK(\d+)\.json', 1) AS cik,
+                        (submissions.filings->'recent'->'accessionNumber')[idx.generate_series]::VARCHAR AS accession_number,
+                        (submissions.filings->'recent'->'filingDate')[idx.generate_series]::VARCHAR::TIMESTAMP_NS AS filing_date,
+                        (submissions.filings->'recent'->'reportDate')[idx.generate_series]::VARCHAR::TIMESTAMP_NS AS report_date,
+                        (submissions.filings->'recent'->'acceptanceDatetime')[idx.generate_series]::VARCHAR::TIMESTAMPTZ AS acceptance_datetime,
+                        (submissions.filings->'recent'->'form')[idx.generate_series]::VARCHAR AS form,
+                        (submissions.filings->'recent'->'fileNumber')[idx.generate_series]::VARCHAR AS file_number,
+                        (submissions.filings->'recent'->'filmNumber')[idx.generate_series]::VARCHAR AS film_number,
+                        (submissions.filings->'recent'->'items')[idx.generate_series]::VARCHAR AS items,
+                        (submissions.filings->'recent'->'size')[idx.generate_series]::VARCHAR::BIGINT AS size,
+                        (submissions.filings->'recent'->'isXBRL')[idx.generate_series]::VARCHAR::BOOLEAN AS is_xbrl,
+                        (submissions.filings->'recent'->'isInlineXBRL')[idx.generate_series]::VARCHAR::BOOLEAN AS is_inline_xbrl,
+                        (submissions.filings->'recent'->'primaryDocument')[idx.generate_series]::VARCHAR AS primary_document,
+                        (submissions.filings->'recent'->'primaryDocDescription')[idx.generate_series]::VARCHAR AS primary_doc_description
+                    FROM (
+                        SELECT *
+                        FROM read_json({submission_json_files},
+                            format='auto',
+                            columns={{
+                                'filings': 'JSON',
+                                'filename': 'VARCHAR'
+                            }}
+                        )
+                        WHERE json_array_length(filings->'recent'->'accessionNumber') > 0
+                    ) AS submissions,
+                    GENERATE_SERIES(0, (json_array_length(submissions.filings->'recent'->'accessionNumber') - 1)::BIGINT) AS idx
+                    WHERE regexp_extract(submissions.filename, 'CIK(\d+)\.json', 1) IS NOT NULL;
                 ''')
                 logger.info("Finished loading data into temp_filings.")
 
             if not companyfacts_json_files:
                 logger.warning("No companyfacts JSON files found to process.")
             else:
-                # --- Load XBRL Tags ---
-                logger.info("Loading data into temp_xbrl_tags...")
-                db_conn.execute(f'''
-                    INSERT INTO temp_xbrl_tags (taxonomy, tag_name, label, description)
-                    SELECT DISTINCT
-                        taxonomy_entry.key AS taxonomy,
-                        tag_entry.key AS tag_name,
-                        tag_entry.value.label AS label,
-                        tag_entry.value.description AS description
-                    FROM read_json({companyfacts_json_files},
-                        auto_detect=true,
-                        columns={{'facts': 'JSON'}}
-                    ),
-                    UNNEST(JSON_EACH(facts)) AS taxonomy_entry,
-                    UNNEST(JSON_EACH(taxonomy_entry.value)) AS tag_entry;
-                ''');
-                logger.info("Finished loading data into temp_xbrl_tags.")
+                logger.info(f"Processing {len(companyfacts_json_files)} companyfacts files for XBRL tags...")
+                for companyfacts_json_file in tqdm(companyfacts_json_files, desc="Loading XBRL Tags"):
+                    db_conn.execute(f'''
+                        INSERT INTO temp_xbrl_tags (taxonomy, tag_name, label, description)
+                        SELECT DISTINCT
+                            t.taxonomy_key AS taxonomy,
+                            tg.tag_key AS tag_name,
+                            (json_extract(cf_data.facts, t.taxonomy_key)->tg.tag_key)->'label' AS label,
+                            (json_extract(cf_data.facts, t.taxonomy_key)->tg.tag_key)->'description' AS description
+                        FROM
+                            read_json('{companyfacts_json_file}', columns={{'facts': 'JSON'}}) AS cf_data,
+                            UNNEST(json_keys(cf_data.facts)) AS t(taxonomy_key),
+                            UNNEST(json_keys(json_extract(cf_data.facts, t.taxonomy_key))) AS tg(tag_key)
+                    ''')
 
-                # --- Load XBRL Facts ---
-                logger.info("Loading data into temp_xbrl_facts...")
-                db_conn.execute(f'''
-                    INSERT INTO temp_xbrl_facts (cik, accession_number, taxonomy, tag_name, unit, period_end_date, value_numeric, value_text, fy, fp, form, filed_date, frame)
-                    SELECT
-                        cik,
-                        fact_item.accn AS accession_number,
-                        taxonomy_entry.key AS taxonomy,
-                        tag_entry.key AS tag_name,
-                        unit_key AS unit,
-                        fact_item.end AS period_end_date,
-                        fact_item.val AS value_numeric,
-                        fact_item.val::VARCHAR AS value_text,
-                        fact_item.fy AS fy,
-                        fact_item.fp AS fp,
-                        fact_item.form AS form,
-                        fact_item.filed AS filed_date,
-                        fact_item.frame AS frame
-                    FROM read_json({companyfacts_json_files},
-                        auto_detect=true,
-                        columns={{'cik': 'VARCHAR', 'facts': 'JSON'}}
-                    ),
-                    UNNEST(JSON_EACH(facts)) AS taxonomy_entry,
-                    UNNEST(JSON_EACH(taxonomy_entry.value)) AS tag_entry,
-                    UNNEST(JSON_KEYS(tag_entry.value.units)) AS unit_key,
-                    UNNEST(JSON_EXTRACT(tag_entry.value.units, CONCAT('$.', unit_key))) AS fact_item;
-                ''');
-                logger.info("Finished loading data into temp_xbrl_facts.")
-
-                # Update entity_name_cf in temp_companies from companyfacts
-                logger.info("Updating entity_name_cf in temp_companies from companyfacts...")
-                db_conn.execute(f'''
-                    UPDATE temp_companies
-                    SET entity_name_cf = cf.entity_name_cf
-                    FROM (
+                logger.info(f"Processing {len(companyfacts_json_files)} companyfacts files for XBRL facts...")
+                for companyfacts_json_file in tqdm(companyfacts_json_files, desc="Loading XBRL Facts"):
+                    db_conn.execute(f'''
+                        INSERT INTO temp_xbrl_facts (cik, accession_number, taxonomy, tag_name, unit, period_end_date, value_numeric, value_text, fy, fp, form, filed_date, frame)
                         SELECT
-                            cik,
-                            entityName AS entity_name_cf
-                        FROM read_json({companyfacts_json_files},
-                            auto_detect=true,
-                            columns={{'cik': 'VARCHAR', 'entityName': 'VARCHAR'}}
-                        )
-                    ) AS cf
-                    WHERE temp_companies.cik = cf.cik;
-                ''')
-                logger.info("Finished updating entity_name_cf in temp_companies.")
+                            regexp_extract(cf_data.filename, 'CIK(\\d+)\\.json', 1) AS cik,
+                            fact_items.value->'accn' AS accession_number,
+                            t.taxonomy_key AS taxonomy,
+                            tg.tag_key AS tag_name,
+                            u.unit_key AS unit,
+                            fact_items.value->'end' AS period_end_date,
+                            fact_items.value->'val' AS value_numeric,
+                            fact_items.value->'val'::VARCHAR AS value_text,
+                            fact_items.value->'fy' AS fy,
+                            fact_items.value->'fp' AS fp,
+                            fact_items.value->'form' AS form,
+                            fact_items.value->'filed' AS filed_date,
+                            fact_items.value->'frame' AS frame
+                        FROM
+                            read_json('{companyfacts_json_file}', columns={{'facts': 'JSON', 'filename': 'VARCHAR'}}) AS cf_data,
+                            UNNEST(json_keys(cf_data.facts)) AS t(taxonomy_key),
+                            UNNEST(json_keys(json_extract(cf_data.facts, t.taxonomy_key))) AS tg(tag_key),
+                            UNNEST(json_keys(json_extract(json_extract(cf_data.facts, t.taxonomy_key), tg.tag_key, '$.units'))) AS u(unit_key),
+                            UNNEST(json_extract(json_extract(json_extract(cf_data.facts, t.taxonomy_key), tg.tag_key, '$.units'), u.unit_key)) AS fact_items(value)
+                        WHERE regexp_extract(cf_data.filename, 'CIK(\\d+)\\.json', 1) IS NOT NULL
+                    ''')
+
+                logger.info(f"Processing {len(companyfacts_json_files)} companyfacts files for entity names...")
+                for companyfacts_json_file in tqdm(companyfacts_json_files, desc="Updating entity names"):
+                    db_conn.execute(f'''
+                        UPDATE temp_companies
+                        SET entity_name_cf = cf.entity_name_cf
+                        FROM (
+                            SELECT
+                                regexp_extract(filename, 'CIK(\\d+)\\.json', 1) AS cik,
+                                auto_detect=true,
+                                columns={{
+                                    'entityName': 'VARCHAR',
+                                    'filename': 'VARCHAR'
+                                }}
+                            )
+                            WHERE regexp_extract(filename, 'CIK(\d+)\.json', 1) IS NOT NULL
+                        ) AS cf
+                        WHERE temp_companies.cik = cf.cik;
+                    ''')
 
             logger.info(f"Finished processing CIKs.")
 

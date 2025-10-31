@@ -32,6 +32,24 @@
             "justMyCode": true
         },
         {
+            "name": "Debug CLI: json_to_duckdb (with CIK)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["json_to_duckdb", "--cik", "0000001234"], // Replace 0000001234 with the desired CIK
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug CLI: json_to_duckdb (with Limit)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["json_to_duckdb", "--limit", "10"], // Replace 10 with the desired limit
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
             "name": "Debug CLI: load",
             "type": "python",
             "request": "launch",
