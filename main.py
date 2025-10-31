@@ -61,7 +61,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 SCRIPTS = {
     "fetch": SCRIPT_DIR / "data_gathering/fetch_edgar_archives.py",
-    "json_to_duckdb": SCRIPT_DIR / "data_processing/json_to_duckdb.py",
+    "parse-to-parquet": SCRIPT_DIR / "data_processing/parse_to_parquet.py",
+    "json_to_duckdb": SCRIPT_DIR / "data_processing/json_to_duckdb_refactored.py",
     "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
     "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
@@ -132,7 +133,7 @@ def main():
         nargs="?",
         default="all",
         choices=[
-            "all", "fetch", "json_to_duckdb", "load", "validate", "cleanup", "feature_eng",
+            "all", "fetch", "parse-to-parquet", "load", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk"
         ],
@@ -152,10 +153,9 @@ def main():
     if args.step == "all":
         # Run cleanup at the end to free up space
         pipeline_steps_with_args = [
-            ("fetch", None, None),
-            ("json_to_duckdb", None, None),
-            ("load", None, None),
-            ("validate", None, None),
+            ("fetch", None, None), # Fetches zips
+            ("parse-to-parquet", None, None), # Parses JSON to Parquet
+            ("load", None, None), # Loads Parquet into DuckDB
             ("validate", None, None),
             ("gather_macro", None, None),
             ("load_macro", ["macro_economic_data", "--full-refresh"], None),
@@ -175,7 +175,7 @@ def main():
         # Map CLI argument to script key
         script_key = args.step
 
-        # Prepare arguments for specific loader scripts that require a source
+        # Prepare arguments for specific loader scripts that require a source name
         final_args = remaining_args
         if script_key == "load_macro":
             final_args = ["macro_economic_data"] + remaining_args

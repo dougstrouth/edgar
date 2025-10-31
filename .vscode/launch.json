@@ -1,11 +1,8 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug CLI: all",
+            "name": "MAIN: Run 'all' pipeline",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
@@ -14,7 +11,7 @@
             "justMyCode": true
         },
         {
-            "name": "Debug CLI: fetch",
+            "name": "STEP: fetch",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
@@ -23,34 +20,16 @@
             "justMyCode": true
         },
         {
-            "name": "Debug CLI: json_to_duckdb",
+            "name": "STEP: parse-to-parquet",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
-            "args": ["json_to_duckdb"],
+            "args": ["parse-to-parquet"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug CLI: json_to_duckdb (with CIK)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["json_to_duckdb", "--cik", "0000001234"], // Replace 0000001234 with the desired CIK
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: json_to_duckdb (with Limit)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["json_to_duckdb", "--limit", "10"], // Replace 10 with the desired limit
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: load",
+            "name": "STEP: load",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
@@ -59,96 +38,31 @@
             "justMyCode": true
         },
         {
-            "name": "Debug CLI: validate",
+            "name": "STEP: gather-info",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["gather-info"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "STEP: load-info",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load_info"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "STEP: validate",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "args": ["validate"],
             "console": "integratedTerminal",
             "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: cleanup",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["cleanup", "--all", "--cache"],
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: load-stocks",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load-stocks", "stock_history", "stock_fetch_errors", "yf_untrackable_tickers"],
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: load-info",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load-info", "all_yf"],
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: load-macro",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load-macro", "macro_economic_data"],
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug CLI: feature-eng",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["feature-eng"],
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "--- (Individual Scripts Below) ---",
-            "type": "python",
-            "request": "launch",
-            "program": ""
-        },
-        {
-            "name": "Debug Script: check_json_parsing",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/scripts/check_json_parsing.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug Script: gather-stocks",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/stock_data_gatherer.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug Script: gather-info",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/stock_info_gatherer.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
-        {
-            "name": "Debug Script: gather-macro",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/macro_data_gatherer.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        },
+        }
     ]
 }

@@ -237,7 +237,7 @@ if __name__ == "__main__":
                 for companyfacts_json_file in tqdm(companyfacts_json_files, desc="Loading XBRL Tags"):
                     db_conn.execute(f'''
                         INSERT INTO temp_xbrl_tags (taxonomy, tag_name, label, description)
-                        SELECT DISTINCT
+                        SELECT
                             t.taxonomy_key AS taxonomy,
                             tg.tag_key AS tag_name,
                             (json_extract(cf_data.facts, t.taxonomy_key)->tg.tag_key)->'label' AS label,
