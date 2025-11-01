@@ -94,12 +94,7 @@ SCHEMA = {
         "CREATE INDEX IF NOT EXISTS idx_tickers_ticker ON tickers (ticker);",
         "CREATE INDEX IF NOT EXISTS idx_filings_cik ON filings (cik);",
         "CREATE INDEX IF NOT EXISTS idx_filings_form ON filings (form);",
-        "CREATE INDEX IF NOT EXISTS idx_filings_date ON filings (filing_date);",
-        "CREATE INDEX IF NOT EXISTS idx_xbrl_facts_cik_tag ON xbrl_facts (cik, taxonomy, tag_name);",
-        "CREATE INDEX IF NOT EXISTS idx_xbrl_facts_tag_date ON xbrl_facts (taxonomy, tag_name, period_end_date);",
-        "CREATE INDEX IF NOT EXISTS idx_xbrl_facts_accn ON xbrl_facts (accession_number);",
-        "CREATE INDEX IF NOT EXISTS idx_orphan_facts_cik_accn ON xbrl_facts_orphaned (cik, accession_number);",
-        "CREATE INDEX IF NOT EXISTS idx_orphan_facts_tag ON xbrl_facts_orphaned (taxonomy, tag_name);"
+        "CREATE INDEX IF NOT EXISTS idx_filings_date ON filings (filing_date);"
     ]
 }
 
@@ -192,15 +187,22 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 db_conn.rollback()
                 raise swap_e
 
-            # --- Create Indexes on the new tables ---
-            logger.info("Creating indexes (may take time)...")
+            # --- Create Indexes on the new tables (one transaction per index) ---
+            logger.info("Creating indexes (may take time, one transaction per index)...")
             for index_sql in SCHEMA["indexes"]:
-                logger.debug(f"Executing: {index_sql}")
                 try:
+                    logger.info(f"Beginning transaction for index: {index_sql}")
+                    db_conn.begin()
                     db_conn.execute(index_sql)
+                    db_conn.commit()
+                    logger.info(f"Successfully created index: {index_sql}")
                 except Exception as index_e:
-                    logger.error(f"Failed to create index: {index_sql}. Error: {index_e}")
-            logger.info("Indexes created successfully.")
+                    logger.error(f"Failed to create index: {index_sql}. Rolling back. Error: {index_e}")
+                    try:
+                        db_conn.rollback()
+                    except Exception as rb_e:
+                        logger.error(f"Failed to rollback transaction for index creation: {rb_e}")
+            logger.info("Index creation process finished.")
 
     except ConnectionError as e:
         logger.critical(f"Database Connection Error: {e}. Cannot continue load.")

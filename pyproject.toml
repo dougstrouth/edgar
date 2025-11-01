@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "datetime>=5.5",
-    "dotenv>=0.9.9",
     "duckdb>=1.2.2",
     "fredapi>=0.5.2",
     "ipykernel>=6.29.5",
