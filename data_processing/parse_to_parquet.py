@@ -45,6 +45,7 @@ def parse_cik_data_worker(cik: str, submissions_dir: Path, companyfacts_dir: Pat
         "cik": cik, "companies": None, "tickers": [], "former_names": [], "filings": [],
         "xbrl_tags": [], "xbrl_facts": [], "company_entity_name": None, "found_any_file": False
     }
+    relevant_accession_numbers: Set[str] = set()
 
     if submission_json_path.is_file():
         parsed_data_for_cik["found_any_file"] = True
@@ -82,7 +83,7 @@ if __name__ == "__main__":
     # Configure the json_parse logger to be less verbose
     logging.getLogger(json_parse.__name__).setLevel(logging.WARNING)
 
-    max_parsing_workers = config.get_optional_int("MAX_CPU_IO_WORKERS", DEFAULT_MAX_CPU_IO_WORKERS)
+    max_parsing_workers = config.MAX_CPU_IO_WORKERS
 
     logger.info(f"--- Starting EDGAR JSON to Parquet Conversion ---")
     config.PARQUET_DIR.mkdir(parents=True, exist_ok=True)

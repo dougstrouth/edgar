@@ -108,8 +108,12 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
     # Define PRAGMA settings for write-heavy operations
     write_pragmas = {
         'threads': os.cpu_count(),
-        'memory_limit': '4GB'  # The connection utility handles quoting
+        'memory_limit': config.DUCKDB_MEMORY_LIMIT
     }
+    if config.DUCKDB_TEMP_DIR:
+        config.DUCKDB_TEMP_DIR.mkdir(exist_ok=True)
+        write_pragmas['temp_directory'] = str(config.DUCKDB_TEMP_DIR)
+        logger.info(f"Using temporary directory for DuckDB: {config.DUCKDB_TEMP_DIR}")
 
     try:
         with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=False, pragma_settings=write_pragmas) as db_conn:
