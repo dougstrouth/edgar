@@ -9,6 +9,7 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
     1.  **Parse to Parquet**: Raw JSON data is first parsed into a highly efficient, columnar Parquet format. This intermediate step allows for fast, parallel processing and decouples parsing from database loading.
     2.  **Load to Database**: Parquet files are bulk-loaded into a DuckDB database, which is extremely fast for analytical queries.
 *   **Atomic Database Updates**: The data loading process uses a "blue-green" deployment strategy. Data is loaded into temporary tables, and only upon successful completion are the live tables atomically swapped. This ensures the database is never left in a corrupted or incomplete state, even if a load fails midway.
+*   **Data Ordering for Performance**: During the database load, the largest tables (`xbrl_facts` and `filings`) are pre-sorted on commonly queried columns (like `cik`, `form`, and `filing_date`). This significantly improves query performance by making DuckDB's automatic zonemap indexes more effective.
 *   **Supplementary Data Integration**:
     *   **Yahoo Finance**: Fetches historical stock prices (OHLCV), company profile information, financial statements, and corporate actions.
     *   **Federal Reserve (FRED)**: Gathers key macroeconomic time-series data (e.g., GDP, CPI, interest rates) to provide economic context for financial models.
@@ -75,26 +76,49 @@ The pipeline is controlled via `main.py`.
 
 ### Running the Full Pipeline
 
-To run all steps in the correct sequence (fetch, parse, load, validate, cleanup), use:
+To run the core data pipeline, which includes fetching SEC data, parsing it, loading it into the database, gathering macroeconomic data, and cleaning up, use:
 ```bash
 python main.py all
 ```
+The `all` command runs the following steps in sequence: `fetch`, `parse-to-parquet`, `load`, `validate`, `gather_macro`, `load_macro`, `gather_market_risk`, `load_market_risk`, and `cleanup`.
 
-> **Note**: The supplementary data gathering steps (`gather-stocks`, `gather-info`, `gather-macro`) are currently disabled in the `all` command due to potential API rate-limiting issues. They can be run individually.
+> **Note**: The supplementary data gathering steps for individual stocks from Yahoo Finance (`gather-stocks`, `gather-info`) are not included in the `all` command due to potential API rate-limiting issues. They should be run individually.
 
 ### Running Individual Steps
 
 You can run any single step of the pipeline. This is useful for debugging or re-running a failed stage.
 
+**Core EDGAR Pipeline:**
 ```bash
-# Download SEC bulk data
+# 1. Download SEC bulk data
 python main.py fetch
 
-# Parse downloaded JSON into Parquet
+# 2. Parse downloaded JSON into Parquet
 python main.py parse-to-parquet
 
-# Load the Parquet files into DuckDB
+# 3. Load the Parquet files into DuckDB
 python main.py load
+```
+
+**Supplementary Data Gathering:**
+```bash
+# Gather company profile info from Yahoo Finance
+python main.py gather_info
+python main.py load_info
+
+# Gather macroeconomic data from FRED
+python main.py gather_macro
+python main.py load_macro
+
+# Gather market risk factors
+python main.py gather_market_risk
+python main.py load_market_risk
+```
+
+**Other Commands:**
+```bash
+# Run feature engineering scripts
+python main.py feature_eng
 
 # Validate the data in the database
 python main.py validate

@@ -103,7 +103,8 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
     # Define PRAGMA settings for write-heavy operations
     write_pragmas = {
         'threads': os.cpu_count(),
-        'memory_limit': config.DUCKDB_MEMORY_LIMIT
+        'memory_limit': config.DUCKDB_MEMORY_LIMIT,
+        'max_temp_directory_size': '300GB'
     }
     if config.DUCKDB_TEMP_DIR:
         config.DUCKDB_TEMP_DIR.mkdir(exist_ok=True)
