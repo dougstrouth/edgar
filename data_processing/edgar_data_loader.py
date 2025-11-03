@@ -172,7 +172,8 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                     CREATE OR REPLACE TABLE xbrl_facts_new AS
                     SELECT p.* FROM read_parquet('{0}/*.parquet') p
                     JOIN filings_new f ON p.accession_number = f.accession_number
-                    JOIN companies_new c ON p.cik = c.cik;
+                    JOIN companies_new c ON p.cik = c.cik
+                    ORDER BY p.filed_date;
                 """.format(facts_parquet_path))
 
                 # Create the new orphaned facts table
@@ -182,7 +183,8 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                     SELECT p.* FROM read_parquet('{0}/*.parquet') p LEFT JOIN (
                         SELECT f.accession_number, c.cik FROM filings_new f JOIN companies_new c ON f.cik = c.cik
                     ) AS valid_filings ON p.accession_number = valid_filings.accession_number AND p.cik = valid_filings.cik
-                    WHERE valid_filings.accession_number IS NULL;
+                    WHERE valid_filings.accession_number IS NULL
+                    ORDER BY p.filed_date;
                 """.format(facts_parquet_path))
             else:
                 logger.warning("Parquet directory for 'xbrl_facts' not found. Creating empty new fact tables.")

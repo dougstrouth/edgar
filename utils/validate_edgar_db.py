@@ -122,6 +122,46 @@ def check_orphaned_facts(con: duckdb.DuckDBPyConnection, logger: logging.Logger)
     results.append(run_validation_query(con, "SELECT COUNT(o.*) as count FROM xbrl_facts_orphaned o JOIN filings f ON o.accession_number = f.accession_number AND o.cik = f.cik;", "Orphan Check: Orphaned facts with existing filings", logger, expect_zero=True))
     return results
 
+def check_xbrl_facts_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
+    """
+    Runs various checks on the xbrl_facts table for data integrity.
+    """
+    results = []
+    logger.info("\n=== Checking XBRL Facts Data Integrity ===")
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+    table_name = "xbrl_facts"
+
+    if table_name in db_tables:
+        # Check for NULLs in key columns
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE cik IS NULL OR accession_number IS NULL OR taxonomy IS NULL OR tag_name IS NULL OR form IS NULL;", f"{table_name}: NULL values in key identifier columns", logger, expect_zero=True))
+        
+        # Check for NULLs in financial value columns where unit is a monetary value
+        monetary_units = ['USD', 'EUR', 'JPY', 'GBP', 'CAD', 'CHF', 'AUD', 'CNY', 'INR'] # Add more as needed
+        monetary_units_str = "', '".join(monetary_units)
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE unit IN ('{monetary_units_str}') AND value_numeric IS NULL;", f"{table_name}: NULL values for monetary facts", logger, expect_zero=True))
+
+        # Check for invalid date/time values
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE period_end_date > filed_date;", f"{table_name}: period_end_date is after filed_date", logger, expect_zero=True))
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE filed_date IS NULL;", f"{table_name}: NULL filed_date date", logger, expect_zero=True))
+
+        # Check for facts with no specified unit
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE unit IS NULL OR unit = '';", f"{table_name}: Facts with no unit specified", logger, warning_threshold=1000))
+
+        # Informational check for outlier values in common financial tags (e.g., Assets, Revenues)
+        # This is a simple example; more sophisticated outlier detection might be needed
+        outlier_tags = ['Assets', 'Revenues', 'NetIncomeLoss']
+        for tag in outlier_tags:
+            query = f"""
+                SELECT cik, accession_number, value_numeric
+                FROM {table_name}
+                WHERE tag_name = '{tag}' AND ABS(value_numeric) > 1e14 
+                ORDER BY ABS(value_numeric) DESC
+                LIMIT 5;
+            """
+            results.append(run_validation_query(con, query, f"{table_name}: Potential outliers for tag '{tag}'", logger, warning_threshold=0))
+
+    return results
+
 def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Runs various checks on the yfinance supplementary tables."""
     results = []
@@ -238,6 +278,7 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     all_results.extend(check_table_counts(con, logger))
     all_results.extend(check_edgar_fk_integrity(con, logger))
     all_results.extend(check_orphaned_facts(con, logger))
+    all_results.extend(check_xbrl_facts_validations(con, logger))
     all_results.extend(check_yf_data_validations(con, logger)) # Add new YF checks
     all_results.extend(check_table_uniqueness(con, logger))
     all_results.extend(check_market_risk_validations(con, logger))
