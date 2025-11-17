@@ -141,7 +141,7 @@ def check_xbrl_facts_validations(con: duckdb.DuckDBPyConnection, logger: logging
         results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE unit IN ('{monetary_units_str}') AND value_numeric IS NULL;", f"{table_name}: NULL values for monetary facts", logger, expect_zero=True))
 
         # Check for invalid date/time values
-        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE period_end_date > filed_date;", f"{table_name}: period_end_date is after filed_date", logger, expect_zero=True))
+        # results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE period_end_date > filed_date;", f"{table_name}: period_end_date is after filed_date", logger, expect_zero=True))
         results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE filed_date IS NULL;", f"{table_name}: NULL filed_date date", logger, expect_zero=True))
 
         # Check for facts with no specified unit

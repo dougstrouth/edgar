@@ -63,6 +63,15 @@
             "args": ["validate"],
             "console": "integratedTerminal",
             "justMyCode": true
+        },
+        {
+            "name": "STEP: summarize",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["summarize"],
+            "console": "integratedTerminal",
+            "justMyCode": true
         }
     ]
 }

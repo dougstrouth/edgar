@@ -22,6 +22,7 @@ import time
 import sys
 import zipfile
 import json
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 # from dotenv import load_dotenv # No longer needed here
@@ -370,6 +371,10 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # --- Initialize Config and Logging ---
+    parser = argparse.ArgumentParser(description="Download and process SEC EDGAR data.")
+    parser.add_argument("--ciks", type=str, help="Comma-separated list of CIKs to fetch.")
+    args = parser.parse_args()
+
     try:
         config = AppConfig(calling_script_path=Path(__file__))
     except SystemExit as e:
@@ -405,78 +410,119 @@ if __name__ == "__main__":
     download_metadata_list = []
     current_run_timestamp = datetime.now(timezone.utc)
 
-    logger.info("Starting file checks and downloads...")
-    for key, url in DOWNLOAD_URLS.items():
-        filename = Path(url).name
-        # Use paths from config object
-        local_filepath = config.DOWNLOAD_DIR / filename
-        archive_stem = local_filepath.stem
-        specific_extract_dir = config.EXTRACT_BASE_DIR / archive_stem
+    if args.ciks:
+        ciks_to_fetch = [cik.strip() for cik in args.ciks.split(',')]
+        logger.info(f"Targeted fetch for CIKs: {ciks_to_fetch}")
+        for cik in ciks_to_fetch:
+            # Pad CIK with leading zeros to 10 digits
+            padded_cik = cik.zfill(10)
+            url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
+            filename = f"CIK{padded_cik}.json"
+            local_filepath = config.SUBMISSIONS_DIR / filename
+            
+            # Always download for now, can add HEAD check later if needed
+            downloaded_path = download_file(url, config.SUBMISSIONS_DIR, filename, headers, logger)
 
-        final_filepath = None
-        file_size = None # Initialize
-
-        # --- File Check / Download Logic (Uses logger) ---
-        needs_download, status, local_mtime_dt = _get_file_status(url, local_filepath, headers, logger)
-        needs_processing = needs_download # Assume any downloaded file needs processing
-
-        if needs_download:
-            logger.info(f"Proceeding with download for {filename} (Reason: {status})")
-            # Pass logger to download function
-            downloaded_path = download_file(url, config.DOWNLOAD_DIR, filename, headers, logger)
             if downloaded_path and downloaded_path.is_file():
-                 final_filepath = downloaded_path; download_success = True
-                 if status.startswith("Requires Update"): status = "Updated"
-                 elif status.startswith("Requires Download"): status = "Downloaded"
-                 try:
-                      local_stat = final_filepath.stat()
-                      file_size = local_stat.st_size
-                      local_mtime_timestamp = local_stat.st_mtime
-                      local_mtime_dt = datetime.fromtimestamp(local_mtime_timestamp, timezone.utc)
-                 except OSError as e:
-                      logger.error(f"Could not get stats for downloaded file {final_filepath}: {e}")
-                      status = "Failed Post-Download Stat"; download_success = False; needs_processing = False
+                try:
+                    local_stat = downloaded_path.stat()
+                    file_size = local_stat.st_size
+                    local_mtime_dt = datetime.fromtimestamp(local_stat.st_mtime, timezone.utc)
+                    status = "Downloaded"
+                    
+                    download_metadata_list.append({
+                        "file_path": str(downloaded_path.resolve()),
+                        "file_name": filename,
+                        "url": url,
+                        "size_bytes": file_size,
+                        "local_last_modified_utc": local_mtime_dt,
+                        "download_timestamp_utc": current_run_timestamp,
+                        "status": status
+                    })
+                except OSError as e:
+                    logger.error(f"Could not get stats for downloaded file {downloaded_path}: {e}")
+
+    else:
+        logger.info("Starting file checks and downloads...")
+        for key, url in DOWNLOAD_URLS.items():
+            filename = Path(url).name
+            # Use paths from config object
+            local_filepath = config.DOWNLOAD_DIR / filename
+            archive_stem = local_filepath.stem
+            specific_extract_dir = config.EXTRACT_BASE_DIR / archive_stem
+
+            final_filepath = None
+            file_size = None # Initialize
+
+            # --- File Check / Download Logic (Uses logger) ---
+            needs_download, status, local_mtime_dt = _get_file_status(url, local_filepath, headers, logger)
+            needs_processing = needs_download # Assume any downloaded file needs processing
+
+            # If the file is up-to-date, check if it was actually extracted.
+            # If not, force processing. This handles cases where the zip exists but JSONs were deleted.
+            if not needs_download and local_filepath.suffix.lower() == '.zip':
+                if not specific_extract_dir.is_dir() or not any(specific_extract_dir.iterdir()):
+                    logger.warning(f"'{filename}' is up-to-date, but extraction directory is missing or empty. Forcing re-processing.")
+                    needs_processing = True
+                    status = "Extraction Required"  # Give it a more descriptive status
+
+            if needs_download:
+                logger.info(f"Proceeding with download for {filename} (Reason: {status})")
+                # Pass logger to download function
+                downloaded_path = download_file(url, config.DOWNLOAD_DIR, filename, headers, logger)
+                if downloaded_path and downloaded_path.is_file():
+                     final_filepath = downloaded_path; download_success = True
+                     if status.startswith("Requires Update"): status = "Updated"
+                     elif status.startswith("Requires Download"): status = "Downloaded"
+                     try:
+                          local_stat = final_filepath.stat()
+                          file_size = local_stat.st_size
+                          local_mtime_timestamp = local_stat.st_mtime
+                          local_mtime_dt = datetime.fromtimestamp(local_mtime_timestamp, timezone.utc)
+                     except OSError as e:
+                          logger.error(f"Could not get stats for downloaded file {final_filepath}: {e}")
+                          status = "Failed Post-Download Stat"; download_success = False; needs_processing = False
+                else:
+                    logger.warning(f"Download failed for {key}.")
+                    status = "Failed"; download_success = False; needs_processing = False
+            else: # File is up-to-date, not downloaded
+                final_filepath = local_filepath
+                try:
+                    file_size = final_filepath.stat().st_size
+                except OSError as e:
+                    logger.error(f"Could not get stats for existing file {final_filepath}: {e}")
+                    status = "Failed Stat"
+
+
+            # --- Post-Download/Check Processing (Uses logger) ---
+            sample_log_message = ""
+            if final_filepath and final_filepath.is_file() and needs_processing:
+                if final_filepath.suffix.lower() == '.zip':
+                    logger.info(f"Processing required for ZIP: {final_filepath.name}")
+                    # Pass logger to extraction/sampling function
+                    process_status, sample_data = extract_and_sample_zip_archive(final_filepath, specific_extract_dir, max_cpu_io_workers)
+                    status = process_status
+                    if sample_data:
+                        sample_log_message = f"Sample data from {archive_stem}: {sample_data}" # noqa
+                        logger.info(sample_log_message)
+                elif final_filepath.suffix.lower() == '.json':
+                     logger.info(f"File {final_filepath.name} is JSON. No extraction needed.")
+                     needs_processing = False
+                else:
+                    logger.debug(f"File {final_filepath.name} is not a ZIP or JSON. Skipping processing.")
+                    needs_processing = False
+            elif status == "Up-to-date" and not needs_processing:
+                 logger.info(f"Skipping processing for {filename} as it's up-to-date and already extracted.")
+
+            # --- Record Metadata (Logic unchanged, but context provides logger) ---
+            if final_filepath and final_filepath.is_file():
+                download_metadata_list.append({ "file_path": str(final_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": file_size, "local_last_modified_utc": local_mtime_dt, "download_timestamp_utc": current_run_timestamp, "status": status })
             else:
-                logger.warning(f"Download failed for {key}.")
-                status = "Failed"; download_success = False; needs_processing = False
-        else: # File is up-to-date, not downloaded
-            final_filepath = local_filepath
-            try:
-                file_size = final_filepath.stat().st_size
-            except OSError as e:
-                logger.error(f"Could not get stats for existing file {final_filepath}: {e}")
-                status = "Failed Stat"
+                 logger.error(f"Could not reliably catalog metadata for {key} (Status: {status}, Needs Download: {needs_download}, Needs Processing: {needs_processing}).")
+                 metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": None, "local_last_modified_utc": None, "download_timestamp_utc": current_run_timestamp, "status": f"Cataloging Error ({status})" }
+                 if status != "Unknown": download_metadata_list.append(metadata)
 
-
-        # --- Post-Download/Check Processing (Uses logger) ---
-        sample_log_message = ""
-        if final_filepath and final_filepath.is_file() and needs_processing:
-            if final_filepath.suffix.lower() == '.zip':
-                logger.info(f"Processing required for ZIP: {final_filepath.name}")
-                # Pass logger to extraction/sampling function
-                process_status, sample_data = extract_and_sample_zip_archive(final_filepath, specific_extract_dir, max_cpu_io_workers)
-                status = process_status
-                if sample_data:
-                    sample_log_message = f"Sample data from {archive_stem}: {sample_data}" # noqa
-                    logger.info(sample_log_message)
-            elif final_filepath.suffix.lower() == '.json':
-                 logger.info(f"File {final_filepath.name} is JSON. No extraction needed.")
-                 needs_processing = False
-            else:
-                logger.debug(f"File {final_filepath.name} is not a ZIP or JSON. Skipping processing.")
-                needs_processing = False
-        elif status == "Up-to-date" and not needs_processing:
-             logger.info(f"Skipping processing for {filename} as it's up-to-date and already extracted.")
-
-        # --- Record Metadata (Logic unchanged, but context provides logger) ---
-        if final_filepath and final_filepath.is_file():
-            download_metadata_list.append({ "file_path": str(final_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": file_size, "local_last_modified_utc": local_mtime_dt, "download_timestamp_utc": current_run_timestamp, "status": status })
-        else:
-             logger.error(f"Could not reliably catalog metadata for {key} (Status: {status}, Needs Download: {needs_download}, Needs Processing: {needs_processing}).")
-             metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": None, "local_last_modified_utc": None, "download_timestamp_utc": current_run_timestamp, "status": f"Cataloging Error ({status})" }
-             if status != "Unknown": download_metadata_list.append(metadata)
-
-        time.sleep(0.1) # Keep polite delay
+            time.sleep(0.1) # Keep polite delay
 
     logger.info(f"Finished download checks and processing attempts. {len(download_metadata_list)} file statuses recorded for catalog update.")
 

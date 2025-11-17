@@ -65,6 +65,14 @@ SCHEMA = {
             items                       VARCHAR, size BIGINT, is_xbrl BOOLEAN, is_inline_xbrl BOOLEAN, primary_document VARCHAR,
             primary_doc_description VARCHAR
         );""",
+    "filing_summaries": """
+        CREATE TABLE IF NOT EXISTS filing_summaries (
+            accession_number            VARCHAR PRIMARY KEY,
+            summary_text                VARCHAR,
+            summary_model               VARCHAR,
+            summary_date                TIMESTAMPTZ DEFAULT now()
+            -- FOREIGN KEY(accession_number) REFERENCES filings(accession_number) -- Removed for bulk load performance
+        );""",
     "xbrl_tags": """
         CREATE TABLE IF NOT EXISTS xbrl_tags (
             taxonomy                    VARCHAR NOT NULL COLLATE NOCASE,
@@ -117,8 +125,20 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
 
             # --- Create Base Tables (if they don't exist at all) ---
             logger.info("Creating tables if they don't exist...")
-            for table_name, create_sql in SCHEMA.items():
-                if table_name != "indexes":
+            # Define the order of table creation to respect foreign key constraints
+            table_creation_order = [
+                "companies",
+                "filings",  # Must be created before filing_summaries
+                "tickers",
+                "former_names",
+                "filing_summaries",
+                "xbrl_tags",
+                "xbrl_facts",
+                "xbrl_facts_orphaned"
+            ]
+            for table_name in table_creation_order:
+                if table_name in SCHEMA:
+                    create_sql = SCHEMA[table_name]
                     db_conn.execute(create_sql)
             logger.info("Base tables created or already exist.")
 
@@ -126,7 +146,7 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
             logger.info("--- Starting Blue-Green Load: Creating new tables from Parquet ---")
 
             # Load main tables
-            main_tables = ["companies", "tickers", "former_names", "filings", "xbrl_tags"]
+            main_tables = ["companies", "tickers", "former_names", "filings", "xbrl_tags", "filing_summaries"]
             for table in main_tables:
                 table_new = f"{table}_new"
                 parquet_path = config.PARQUET_DIR / table
@@ -170,20 +190,37 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 logger.info("Creating new table 'xbrl_facts_new'...")
                 db_conn.execute("""
                     CREATE OR REPLACE TABLE xbrl_facts_new AS
-                    SELECT p.* FROM read_parquet('{0}/*.parquet') p
+                    SELECT
+                        p.cik,
+                        p.accession_number,
+                        p.taxonomy,
+                        p.tag_name,
+                        p.unit,
+                        p.period_end_date,
+                        p.value_numeric,
+                        p.value_text,
+                        p.fy,
+                        p.fp,
+                        p.form,
+                        f.filing_date AS filed_date, -- Use the filing date from the filings table
+                        p.frame
+                    FROM read_parquet('{0}/*.parquet') p
                     JOIN filings_new f ON p.accession_number = f.accession_number
                     JOIN companies_new c ON p.cik = c.cik
-                    ORDER BY p.filed_date;
+                    ORDER BY f.filing_date;
                 """.format(facts_parquet_path))
 
                 # Create the new orphaned facts table
                 logger.info("Creating new table 'xbrl_facts_orphaned_new'...")
                 db_conn.execute("""
                     CREATE OR REPLACE TABLE xbrl_facts_orphaned_new AS
-                    SELECT p.* FROM read_parquet('{0}/*.parquet') p LEFT JOIN (
-                        SELECT f.accession_number, c.cik FROM filings_new f JOIN companies_new c ON f.cik = c.cik
-                    ) AS valid_filings ON p.accession_number = valid_filings.accession_number AND p.cik = valid_filings.cik
-                    WHERE valid_filings.accession_number IS NULL
+                    SELECT p.*
+                    FROM read_parquet('{0}/*.parquet') p
+                    WHERE p.cik IN (SELECT cik FROM companies_new) -- Only consider facts from CIKs in the current batch
+                    AND NOT EXISTS ( -- And from those, find facts without a matching filing
+                        SELECT 1 FROM filings_new f
+                        WHERE f.accession_number = p.accession_number AND f.cik = p.cik
+                    )
                     ORDER BY p.filed_date;
                 """.format(facts_parquet_path))
             else:

@@ -73,8 +73,10 @@ SCRIPTS = {
     "gather_market_risk": SCRIPT_DIR / "data_gathering/market_risk_gatherer.py",
     "load_market_risk": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "feature_eng": SCRIPT_DIR / "data_processing/feature_engineering.py",
+    "summarize": SCRIPT_DIR / "data_processing/summarize_filings.py",
     "validate": SCRIPT_DIR / "utils/validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "scripts/cleanup_artifacts.py",
+    "investigate_orphans": SCRIPT_DIR / "investigate_orphans.py",
 }
 
 def run_script_target(script_path, script_args):
@@ -133,9 +135,9 @@ def main():
         nargs="?",
         default="all",
         choices=[
-            "all", "fetch", "parse-to-parquet", "load", "validate", "cleanup", "feature_eng",
+            "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
-            "gather_market_risk", "load_market_risk"
+            "gather_market_risk", "load_market_risk", "investigate_orphans"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
@@ -169,7 +171,7 @@ def main():
         for step_name, script_args, timeout in pipeline_steps_with_args:
             if not run_script(step_name, script_args=script_args, timeout=timeout):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
-                sys.exit(1)
+                anssys.exit(1)
         logger.info("Full pipeline completed successfully!")
     else:
         # Map CLI argument to script key
