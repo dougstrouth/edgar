@@ -228,6 +228,17 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 db_conn.execute(SCHEMA["xbrl_facts"].replace("CREATE TABLE IF NOT EXISTS xbrl_facts", "CREATE OR REPLACE TABLE xbrl_facts_new"))
                 db_conn.execute(SCHEMA["xbrl_facts_orphaned"].replace("CREATE TABLE IF NOT EXISTS xbrl_facts_orphaned", "CREATE OR REPLACE TABLE xbrl_facts_orphaned_new"))
 
+            # --- Safety Check: Prevent wiping database if all parquet directories are empty ---
+            empty_count = sum(1 for table in main_tables if not (config.PARQUET_DIR / table).exists() or not any((config.PARQUET_DIR / table).glob('*.parquet')))
+            if empty_count == len(main_tables):
+                logger.critical("SAFETY ABORT: All parquet directories are empty or missing!")
+                logger.critical("This would wipe all EDGAR data from the database.")
+                logger.critical("Please run: python main.py fetch && python main.py parse-to-parquet")
+                logger.critical("Then try loading again.")
+                raise RuntimeError("Refusing to load empty data and wipe database")
+            elif empty_count > 0:
+                logger.warning(f"{empty_count}/{len(main_tables)} parquet directories are empty. Some tables will be replaced with empty data.")
+
             # --- Atomic Swap ---
             logger.info("--- Starting Atomic Table Swap ---")
             db_conn.begin()

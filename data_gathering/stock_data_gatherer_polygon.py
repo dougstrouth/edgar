@@ -37,7 +37,7 @@ from utils.config_utils import AppConfig
 from utils.logging_utils import setup_logging
 from utils.database_conn import ManagedDatabaseConnection
 from utils.polygon_client import PolygonClient, PolygonRateLimiter
-from utils.prioritizer import prioritize_tickers_hybrid
+from utils.prioritizer import prioritize_tickers_for_stock_data
 
 # Setup logging
 SCRIPT_NAME = Path(__file__).stem
@@ -72,10 +72,9 @@ def get_tickers_to_process(
     if not all_tickers:
         return []
     
-    # Apply limit to ticker list before prioritization (for performance)
-    tickers_to_prioritize = all_tickers[:limit] if limit else all_tickers
-    
-    return tickers_to_prioritize
+    # Return all tickers - prioritization will happen in run_polygon_pipeline
+    # The limit will be applied AFTER prioritization
+    return all_tickers
 
 
 def get_latest_stock_dates(
@@ -126,6 +125,67 @@ def get_latest_stock_dates(
         logger.warning(f"Could not query latest dates: {e}")
     
     return latest_dates
+
+
+def get_missing_intervals(
+    con: duckdb.DuckDBPyConnection,
+    ticker: str,
+    start_date: date,
+    end_date: date
+) -> List[Dict[str, date]]:
+    """Return a list of (start, end) date ranges where the DB has no data for the ticker.
+
+    This function queries existing dates for the ticker between start_date and end_date
+    and returns the complementary intervals that need fetching. If no rows exist,
+    returns a single interval covering the full requested range.
+    """
+    try:
+        query = "SELECT date FROM stock_history WHERE ticker = ? AND date BETWEEN ? AND ? ORDER BY date"
+        rows = con.execute(query, [ticker, start_date, end_date]).fetchall()
+        existing = [r[0] for r in rows]
+    except Exception as e:
+        logger.warning(f"Could not query existing dates for {ticker}: {e}")
+        return [{'start': start_date, 'end': end_date}]
+
+    # Normalize existing dates to python date objects
+    existing_dates = []
+    for d in existing:
+        if d is None:
+            continue
+        if isinstance(d, datetime):
+            existing_dates.append(d.date())
+        elif isinstance(d, date):
+            existing_dates.append(d)
+        else:
+            try:
+                existing_dates.append(pd.to_datetime(d).date())
+            except Exception:
+                continue
+
+    if not existing_dates:
+        return [{'start': start_date, 'end': end_date}]
+
+    existing_dates = sorted(set(existing_dates))
+    intervals: List[Dict[str, date]] = []
+
+    # Before first existing date
+    first = existing_dates[0]
+    if start_date < first:
+        intervals.append({'start': start_date, 'end': first - timedelta(days=1)})
+
+    # Between existing dates
+    for prev, curr in zip(existing_dates[:-1], existing_dates[1:]):
+        gap_start = prev + timedelta(days=1)
+        gap_end = curr - timedelta(days=1)
+        if gap_start <= gap_end:
+            intervals.append({'start': gap_start, 'end': gap_end})
+
+    # After last existing date
+    last = existing_dates[-1]
+    if last < end_date:
+        intervals.append({'start': last + timedelta(days=1), 'end': end_date})
+
+    return intervals
 
 
 def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -250,20 +310,28 @@ def run_polygon_pipeline(
             logger.warning("No tickers found to process")
             return
         
-        logger.info(f"Processing {len(tickers)} tickers")
+        logger.info(f"Processing up to {limit if limit else 'all'} tickers")
         
-        # Prioritize tickers
+        # Prioritize tickers based on XBRL richness and stock data needs
         try:
-            logger.info("Prioritizing tickers using hybrid strategy...")
-            prioritized = prioritize_tickers_hybrid(
+            logger.info("Prioritizing tickers using XBRL-aware strategy...")
+            prioritized = prioritize_tickers_for_stock_data(
                 db_path=config.DB_FILE_STR,
                 tickers=tickers,
                 lookback_days=365
             )
+            # Apply limit AFTER prioritization to get the most important tickers
+            if limit:
+                prioritized = prioritized[:limit]
             tickers = [ticker for ticker, score in prioritized]
-            logger.info(f"Tickers prioritized. Top 5: {tickers[:5]}")
+            logger.info(f"Tickers prioritized. Top {min(10, len(prioritized))}:")
+            for i, (ticker, score) in enumerate(prioritized[:10], 1):
+                logger.info(f"  {i:2}. {ticker:8} (score: {score:.4f})")
         except Exception as e:
             logger.warning(f"Prioritization failed: {e}. Using unprioritized list.")
+            # Apply limit even if prioritization failed
+            if limit:
+                tickers = tickers[:limit]
         
         # Determine date ranges
         if mode == 'initial_load' or mode == 'full_refresh':
@@ -277,24 +345,50 @@ def run_polygon_pipeline(
             end_date = date.today() - timedelta(days=1)
             start_date = end_date - timedelta(days=365 * lookback_years)
     
-    # Create jobs for workers
+    # Create jobs for workers, split into missing intervals where appropriate
     jobs = []
-    for ticker in tickers:
-        if mode == 'append' and ticker in latest_dates:
-            # Start from day after our latest data
-            ticker_start = latest_dates[ticker] + timedelta(days=1)
-            if ticker_start >= end_date:
-                logger.debug(f"{ticker}: Already up to date")
-                continue
+    skipped_fully_up_to_date = 0
+    total_intervals_created = 0
+    with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con_check:
+        if not con_check:
+            logger.warning("Could not open DB to check existing dates; creating full-range jobs for all tickers")
+            for ticker in tickers:
+                jobs.append({
+                    'ticker': ticker,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'api_key': api_key
+                })
+            total_intervals_created = len(jobs)
         else:
-            ticker_start = start_date
-        
-        jobs.append({
-            'ticker': ticker,
-            'start_date': ticker_start,
-            'end_date': end_date,
-            'api_key': api_key
-        })
+            for ticker in tickers:
+                # Determine candidate start for the ticker
+                if mode == 'append' and ticker in latest_dates:
+                    candidate_start = latest_dates[ticker] + timedelta(days=1)
+                    if candidate_start > end_date:
+                        logger.debug(f"{ticker}: Already up to date")
+                        skipped_fully_up_to_date += 1
+                        continue
+                else:
+                    candidate_start = start_date
+
+                # Compute missing intervals within [candidate_start, end_date]
+                intervals = get_missing_intervals(con_check, ticker, candidate_start, end_date)
+                if not intervals:
+                    logger.debug(f"{ticker}: No missing intervals found; skipping")
+                    skipped_fully_up_to_date += 1
+                    continue
+
+                for interval in intervals:
+                    jobs.append({
+                        'ticker': ticker,
+                        'start_date': interval['start'],
+                        'end_date': interval['end'],
+                        'api_key': api_key
+                    })
+                    total_intervals_created += 1
+
+    logger.info(f"Created {total_intervals_created} fetch intervals across {len(tickers)} tickers (skipped {skipped_fully_up_to_date} fully up-to-date tickers)")
     
     logger.info(f"Created {len(jobs)} fetch jobs")
     

@@ -42,7 +42,9 @@ class PolygonRateLimiter:
             if elapsed < self.min_interval:
                 wait_time = self.min_interval - elapsed
                 logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
-                time.sleep(wait_time)
+                # Add a small random jitter to avoid sync storms
+                jitter = min(1.0, wait_time * 0.1)
+                time.sleep(wait_time + (jitter * (0.5 - time.time() % 1)))
         
         self.last_call_time = time.time()
         self.call_count += 1
@@ -115,9 +117,23 @@ class PolygonClient:
                 
                 # Check for rate limit (429) or server errors (5xx)
                 if response.status_code == 429:
-                    wait_time = self.retry_delay * (2 ** attempt)
-                    logger.warning(f"Rate limit hit (429). Waiting {wait_time}s before retry {attempt + 1}/{self.max_retries}")
-                    time.sleep(wait_time)
+                    # Honor Retry-After header if present
+                    ra = response.headers.get('Retry-After')
+                    try:
+                        wait_time = float(ra) if ra is not None else (self.retry_delay * (2 ** attempt))
+                    except Exception:
+                        wait_time = self.retry_delay * (2 ** attempt)
+
+                    # Add jitter to avoid thundering herd
+                    jitter = min(5.0, wait_time * 0.2)
+                    sleep_time = wait_time + (jitter * (0.5 - time.time() % 1))
+                    logger.warning(f"Rate limit hit (429). Waiting {sleep_time:.1f}s before retry {attempt + 1}/{self.max_retries}")
+                    time.sleep(sleep_time)
+                    # After a 429, increase internal spacing conservatively
+                    try:
+                        self.rate_limiter.min_interval = max(self.rate_limiter.min_interval, sleep_time)
+                    except Exception:
+                        pass
                     continue
                     
                 if response.status_code >= 500:
