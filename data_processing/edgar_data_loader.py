@@ -65,6 +65,14 @@ SCHEMA = {
             items                       VARCHAR, size BIGINT, is_xbrl BOOLEAN, is_inline_xbrl BOOLEAN, primary_document VARCHAR,
             primary_doc_description VARCHAR
         );""",
+    "filing_summaries": """
+        CREATE TABLE IF NOT EXISTS filing_summaries (
+            accession_number            VARCHAR PRIMARY KEY,
+            summary_text                VARCHAR,
+            summary_model               VARCHAR,
+            summary_date                TIMESTAMPTZ DEFAULT now()
+            -- FOREIGN KEY(accession_number) REFERENCES filings(accession_number) -- Removed for bulk load performance
+        );""",
     "xbrl_tags": """
         CREATE TABLE IF NOT EXISTS xbrl_tags (
             taxonomy                    VARCHAR NOT NULL COLLATE NOCASE,
@@ -94,12 +102,7 @@ SCHEMA = {
         "CREATE INDEX IF NOT EXISTS idx_tickers_ticker ON tickers (ticker);",
         "CREATE INDEX IF NOT EXISTS idx_filings_cik ON filings (cik);",
         "CREATE INDEX IF NOT EXISTS idx_filings_form ON filings (form);",
-        "CREATE INDEX IF NOT EXISTS idx_filings_date ON filings (filing_date);",
-        "CREATE INDEX IF NOT EXISTS idx_xbrl_facts_cik_tag ON xbrl_facts (cik, taxonomy, tag_name);",
-        "CREATE INDEX IF NOT EXISTS idx_xbrl_facts_tag_date ON xbrl_facts (taxonomy, tag_name, period_end_date);",
-        "CREATE INDEX IF NOT EXISTS idx_xbrl_facts_accn ON xbrl_facts (accession_number);",
-        "CREATE INDEX IF NOT EXISTS idx_orphan_facts_cik_accn ON xbrl_facts_orphaned (cik, accession_number);",
-        "CREATE INDEX IF NOT EXISTS idx_orphan_facts_tag ON xbrl_facts_orphaned (taxonomy, tag_name);"
+        "CREATE INDEX IF NOT EXISTS idx_filings_date ON filings (filing_date);"
     ]
 }
 
@@ -108,8 +111,12 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
     # Define PRAGMA settings for write-heavy operations
     write_pragmas = {
         'threads': os.cpu_count(),
-        'memory_limit': '4GB'  # The connection utility handles quoting
+        'memory_limit': config.DUCKDB_MEMORY_LIMIT
     }
+    if config.DUCKDB_TEMP_DIR:
+        config.DUCKDB_TEMP_DIR.mkdir(exist_ok=True)
+        write_pragmas['temp_directory'] = str(config.DUCKDB_TEMP_DIR)
+        logger.info(f"Using temporary directory for DuckDB: {config.DUCKDB_TEMP_DIR}")
 
     try:
         with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=False, pragma_settings=write_pragmas) as db_conn:
@@ -118,8 +125,20 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
 
             # --- Create Base Tables (if they don't exist at all) ---
             logger.info("Creating tables if they don't exist...")
-            for table_name, create_sql in SCHEMA.items():
-                if table_name != "indexes":
+            # Define the order of table creation to respect foreign key constraints
+            table_creation_order = [
+                "companies",
+                "filings",  # Must be created before filing_summaries
+                "tickers",
+                "former_names",
+                "filing_summaries",
+                "xbrl_tags",
+                "xbrl_facts",
+                "xbrl_facts_orphaned"
+            ]
+            for table_name in table_creation_order:
+                if table_name in SCHEMA:
+                    create_sql = SCHEMA[table_name]
                     db_conn.execute(create_sql)
             logger.info("Base tables created or already exist.")
 
@@ -127,7 +146,7 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
             logger.info("--- Starting Blue-Green Load: Creating new tables from Parquet ---")
 
             # Load main tables
-            main_tables = ["companies", "tickers", "former_names", "filings", "xbrl_tags"]
+            main_tables = ["companies", "tickers", "former_names", "filings", "xbrl_tags", "filing_summaries"]
             for table in main_tables:
                 table_new = f"{table}_new"
                 parquet_path = config.PARQUET_DIR / table
@@ -137,7 +156,25 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                         # Special handling for filings to ensure accession_number is unique
                         db_conn.execute(f"""
                             CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
-                                SELECT *, ROW_NUMBER() OVER(PARTITION BY accession_number) as rn FROM read_parquet('{parquet_path}/*.parquet')
+                                SELECT *, ROW_NUMBER() OVER(PARTITION BY accession_number ORDER BY filing_date DESC) as rn FROM read_parquet('{parquet_path}/*.parquet')
+                            ) WHERE rn = 1;""")
+                    elif table == "companies":
+                        # Special handling for companies to ensure cik is unique
+                        db_conn.execute(f"""
+                            CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
+                                SELECT *, ROW_NUMBER() OVER(PARTITION BY cik) as rn FROM read_parquet('{parquet_path}/*.parquet')
+                            ) WHERE rn = 1;""")
+                    elif table == "tickers":
+                        # Special handling for tickers to ensure ticker, exchange is unique
+                        db_conn.execute(f"""
+                            CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
+                                SELECT *, ROW_NUMBER() OVER(PARTITION BY ticker, exchange) as rn FROM read_parquet('{parquet_path}/*.parquet')
+                            ) WHERE rn = 1;""")
+                    elif table == "xbrl_tags":
+                        # Special handling for xbrl_tags to ensure taxonomy, tag_name is unique
+                        db_conn.execute(f"""
+                            CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
+                                SELECT *, ROW_NUMBER() OVER(PARTITION BY taxonomy, tag_name) as rn FROM read_parquet('{parquet_path}/*.parquet')
                             ) WHERE rn = 1;""")
                     else:
                         db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
@@ -153,19 +190,38 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 logger.info("Creating new table 'xbrl_facts_new'...")
                 db_conn.execute("""
                     CREATE OR REPLACE TABLE xbrl_facts_new AS
-                    SELECT p.* FROM read_parquet('{0}/*.parquet') p
+                    SELECT
+                        p.cik,
+                        p.accession_number,
+                        p.taxonomy,
+                        p.tag_name,
+                        p.unit,
+                        p.period_end_date,
+                        p.value_numeric,
+                        p.value_text,
+                        p.fy,
+                        p.fp,
+                        p.form,
+                        f.filing_date AS filed_date, -- Use the filing date from the filings table
+                        p.frame
+                    FROM read_parquet('{0}/*.parquet') p
                     JOIN filings_new f ON p.accession_number = f.accession_number
-                    JOIN companies_new c ON p.cik = c.cik;
+                    JOIN companies_new c ON p.cik = c.cik
+                    ORDER BY f.filing_date;
                 """.format(facts_parquet_path))
 
                 # Create the new orphaned facts table
                 logger.info("Creating new table 'xbrl_facts_orphaned_new'...")
                 db_conn.execute("""
                     CREATE OR REPLACE TABLE xbrl_facts_orphaned_new AS
-                    SELECT p.* FROM read_parquet('{0}/*.parquet') p LEFT JOIN (
-                        SELECT f.accession_number, c.cik FROM filings_new f JOIN companies_new c ON f.cik = c.cik
-                    ) AS valid_filings ON p.accession_number = valid_filings.accession_number AND p.cik = valid_filings.cik
-                    WHERE valid_filings.accession_number IS NULL;
+                    SELECT p.*
+                    FROM read_parquet('{0}/*.parquet') p
+                    WHERE p.cik IN (SELECT cik FROM companies_new) -- Only consider facts from CIKs in the current batch
+                    AND NOT EXISTS ( -- And from those, find facts without a matching filing
+                        SELECT 1 FROM filings_new f
+                        WHERE f.accession_number = p.accession_number AND f.cik = p.cik
+                    )
+                    ORDER BY p.filed_date;
                 """.format(facts_parquet_path))
             else:
                 logger.warning("Parquet directory for 'xbrl_facts' not found. Creating empty new fact tables.")
@@ -188,15 +244,22 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 db_conn.rollback()
                 raise swap_e
 
-            # --- Create Indexes on the new tables ---
-            logger.info("Creating indexes (may take time)...")
+            # --- Create Indexes on the new tables (one transaction per index) ---
+            logger.info("Creating indexes (may take time, one transaction per index)...")
             for index_sql in SCHEMA["indexes"]:
-                logger.debug(f"Executing: {index_sql}")
                 try:
+                    logger.info(f"Beginning transaction for index: {index_sql}")
+                    db_conn.begin()
                     db_conn.execute(index_sql)
+                    db_conn.commit()
+                    logger.info(f"Successfully created index: {index_sql}")
                 except Exception as index_e:
-                    logger.error(f"Failed to create index: {index_sql}. Error: {index_e}")
-            logger.info("Indexes created successfully.")
+                    logger.error(f"Failed to create index: {index_sql}. Rolling back. Error: {index_e}")
+                    try:
+                        db_conn.rollback()
+                    except Exception as rb_e:
+                        logger.error(f"Failed to rollback transaction for index creation: {rb_e}")
+            logger.info("Index creation process finished.")
 
     except ConnectionError as e:
         logger.critical(f"Database Connection Error: {e}. Cannot continue load.")

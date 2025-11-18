@@ -1,0 +1,39 @@
+{
+  "cik": "320193",
+  "name": "Apple Inc.",
+  "entityType": "operating",
+  "sic": "3571",
+  "sicDescription": "Electronic Computers",
+  "ein": "943563201",
+  "description": "Sample company",
+  "category": "Technology",
+  "fiscalYearEnd": "0930",
+  "stateOfIncorporation": "CA",
+  "phone": "(800) 275-2273",
+  "flags": "",
+  "addresses": {
+    "mailing": {"street1": "1 Infinite Loop", "city": "Cupertino", "stateOrCountry": "CA", "zipCode": "95014"},
+    "business": {"street1": "1 Infinite Loop", "city": "Cupertino", "stateOrCountry": "CA", "zipCode": "95014"}
+  },
+  "tickers": ["AAPL"],
+  "exchanges": ["NASDAQ"],
+  "formerNames": [{"name": "Apple Computer, Inc.", "from": "1976-04-01", "to": "2007-01-01"}],
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0001193125-20-000001"],
+      "filingDate": ["2020-10-30"],
+      "reportDate": ["2020-09-26"],
+      "acceptanceDateTime": ["2020-10-30T16:00:00Z"],
+      "act": ["34"],
+      "form": ["10-K"],
+      "fileNumber": ["001-145"],
+      "filmNumber": ["20123456"],
+      "items": [""],
+      "size": ["123456"],
+      "isXBRL": [false],
+      "isInlineXBRL": [false],
+      "primaryDocument": ["document.htm"],
+      "primaryDocDescription": ["Annual report"]
+    }
+  }
+}

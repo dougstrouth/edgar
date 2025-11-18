@@ -22,8 +22,18 @@ import logging # Keep for level constants
 import math
 from pathlib import Path
 # from dotenv import load_dotenv # No longer needed here
-from typing import Dict, List, Any, Optional, Union, Tuple,Set # Added Tuple
+from typing import Dict, List, Any, Optional, Union, Tuple, Set # Added Tuple
 from datetime import datetime, date, timezone
+
+class CustomJsonEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder to handle datetime and date objects.
+    """
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super().default(obj)
+
 
 # --- BEGIN: Add project root to sys.path ---
 # This allows the script to be run from anywhere and still find the utils module
@@ -147,7 +157,7 @@ def generate_api_url(template: str, cik: str, **kwargs) -> str:
 
 # --- Function for Parsing Submission JSONs (Using logger) ---
 
-def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Dict, List[Dict]]]]:
+def parse_submission_json_for_db(file_path: Path, processed_accession_numbers: Optional[Set[str]] = None) -> Optional[Dict[str, Union[Dict, List[Dict]]]]:
     """
     Loads and parses a CIK-specific submission JSON file (from submissions.zip),
     structuring output for companies, tickers, former_names, filings tables.
@@ -185,10 +195,11 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
             "ein": str(data['ein']) if data.get('ein') else None,
             "description": str(data['description']) if data.get('description') else None,
             "category": str(data['category']) if data.get('category') else None,
-            "fiscal_year_end": str(data['fiscalYearEnd']) if data.get('fiscalYearEnd') else None,
+            "fiscal_year_end": str(data['fiscalYearEnd']) if data.get('fiscalYearEnd') is not None else "",
             "state_of_incorporation": str(data['stateOfIncorporation']) if data.get('stateOfIncorporation') else None,
             "phone": str(data['phone']) if data.get('phone') else None,
             "flags": str(data['flags']) if data.get('flags') else None,
+            "first_added_timestamp": None,
             "last_parsed_timestamp": now_ts
         }
         addresses = data.get('addresses', {})
@@ -246,6 +257,10 @@ def parse_submission_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Di
                         logger.warning(f"Inconsistent array lengths in 'filings.recent' for {file_path.name}. Skipping filings.")
                     else:
                         for i in range(num_filings):
+                            accession_number = recent.get('accessionNumber', [None]*num_filings)[i]
+                            if processed_accession_numbers and accession_number in processed_accession_numbers:
+                                continue
+
                             filing_entry = {"cik": cik_padded}; valid_entry = True
                             for json_key, (db_key, converter) in FILING_FIELD_MAP.items():
                                 if json_key in recent:
@@ -306,14 +321,17 @@ def _convert_fact_value(raw_value: Any) -> Tuple[Optional[float], Optional[str]]
 
 # --- Function for Parsing CompanyFacts JSONs (Using logger) ---
 
-def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union[Optional[str], List[Dict]]]]:
+def parse_company_facts_json_for_db(file_path: Path, relevant_accession_numbers: Set[str] = None) -> Optional[Dict[str, Union[Optional[str], List[Dict]]]]:
     """
     Loads and parses a CIK-specific company facts JSON file (from companyfacts.zip),
     structuring output for xbrl_tags and xbrl_facts tables.
     Handles splitting numeric/text values for xbrl_facts. Uses module logger.
     """
     if not file_path.is_file():
-        logger.error(f"Company facts JSON file not found: {file_path}")
+        logger.debug(f"Company facts JSON file not found: {file_path}")
+        return None
+    if file_path.stat().st_size == 0:
+        logger.info(f"Company facts JSON file is empty: {file_path.name}. Skipping.")
         return None
     logger.debug(f"Parsing company facts JSON for DB: {file_path.name}")
     try:
@@ -381,10 +399,15 @@ def parse_company_facts_json_for_db(file_path: Path) -> Optional[Dict[str, Union
                             "fp": str(fp_val) if fp_val is not None else None,
                             "form": str(form_val) if form_val is not None else None,
                             "filed_date": parse_date_string(fact.get('filed')),
-                            "frame": str(frame_val) if frame_val is not None else None
+                            "frame": str(frame_val) if frame_val is not None else ""
                         }
-                        if not fact_record["accession_number"]: logger.debug(f"Skip fact missing accn: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, End {fact.get('end')}"); continue
-                        if not fact_record["form"]: logger.debug(f"Skip fact missing form: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, Accn {accession_number}"); continue
+                        if not fact_record["accession_number"]:
+                            logger.debug(f"Skip fact missing accn: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, End {fact.get('end')}")
+                            continue
+                        
+                        if not fact_record["form"]:
+                            logger.debug(f"Skip fact missing form: CIK {cik_padded}, Tag {taxonomy}:{tag_name}, Accn {accession_number}")
+                            continue
 
                         parsed_db_data["xbrl_facts"].append(fact_record)
 

@@ -1,0 +1,11 @@
+{
+  "cik": "0000123456",
+  "name": "Malformed Co",
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0000001"],
+      "filingDate": ["2020-01-01", "2020-02-01"],
+      "form": ["10-K"]
+    }
+  }
+}

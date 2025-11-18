@@ -31,17 +31,13 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
-# --- BEGIN: Add project root to sys.path ---
-# This allows the script to be run from anywhere and still find the utils module
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.append(str(PROJECT_ROOT))
-# --- END: Add project root to sys.path ---
+
 
 # --- Import Utilities ---
 from utils.config_utils import AppConfig                 # Import configuration loader
 from utils.logging_utils import setup_logging            # Import logging setup function
 from utils.database_conn import ManagedDatabaseConnection
-import utils.parquet_converter as parquet_converter # Reuse the parquet saving utility
+from data_processing import parquet_converter # Reuse the parquet saving utility
 
 # --- Setup Logging ---
 SCRIPT_NAME = Path(__file__).stem
@@ -207,6 +203,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     Worker function to be run in a process. Fetches stock history for a single ticker.
     Includes retry logic with exponential backoff for rate-limiting errors.
+    
+    CRITICAL: Data preservation is the top priority. If a fetch succeeds, the data
+    is immediately written to a recovery Parquet file before being returned, ensuring
+    we never lose hard-won API data even if the process crashes.
     """
     # Create a temporary, process-specific cache directory inside a central .cache
     # folder to prevent file locks and keep the project root tidy.
@@ -215,6 +215,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     temp_cache_dir = cache_parent_dir / f"yfinance_{os.getpid()}"
     temp_cache_dir.mkdir(exist_ok=True) # Create the specific process cache dir
     os.environ['YFINANCE_CACHE_DIR'] = str(temp_cache_dir.resolve())
+    
+    # Create a recovery directory for immediate data preservation
+    recovery_dir = cache_parent_dir / "recovery_parquet"
+    recovery_dir.mkdir(exist_ok=True)
 
     try:
         # Create a single session for this worker process to pass to yfinance
@@ -229,6 +233,15 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
             df, error_msg = fetch_stock_history(ticker, start_date, end_date, session)
 
             if not error_msg:
+                # CRITICAL: Write to recovery Parquet IMMEDIATELY to preserve precious API data
+                try:
+                    if df is not None:
+                        recovery_file = recovery_dir / f"stock_history_{ticker}_{int(time.time() * 1000)}.parquet"
+                        df.to_parquet(recovery_file, index=False)
+                        logger.info(f"PRESERVED: {ticker} data written to recovery file {recovery_file.name}")
+                except Exception as save_error:
+                    logger.error(f"CRITICAL: Failed to save recovery data for {ticker}: {save_error}")
+                    # Continue anyway - the main writer will still get it
                 return {'status': 'success', 'job': job, 'data': df}
 
             is_retryable = (
@@ -377,8 +390,9 @@ def run_stock_data_pipeline(
             'threads': os.cpu_count(),
             'memory_limit': '4GB'
         }
-        if config.DUCKDB_TEMP_DIR:
-            write_pragmas['temp_directory'] = config.DUCKDB_TEMP_DIR
+        duckdb_temp_dir = config.get_optional_var("DUCKDB_TEMP_DIR")
+        if duckdb_temp_dir:
+            write_pragmas['temp_directory'] = duckdb_temp_dir
 
         # --- Cleanliness Step for Parquet directories ---
         if mode == 'full_refresh':
@@ -512,8 +526,39 @@ def run_stock_data_pipeline(
     logger.info(f"Data written to Parquet files in: {config.PARQUET_DIR}")
 
 
+import argparse
+
 # --- Script Execution Control ---
 if __name__ == "__main__":
+    # CRITICAL: YFinance gathering is DISABLED by default until we have a prioritization strategy.
+    # The rate limits are severe and we cannot afford to waste API calls on low-priority tickers.
+    # When enabled, all fetched data is written to Parquet IMMEDIATELY to prevent any loss.
+    if os.environ.get("YFINANCE_DISABLED", "1") == "1":
+        logger.warning("=" * 80)
+        logger.warning("YFinance gathering is DISABLED (YFINANCE_DISABLED=1).")
+        logger.warning("This script will NOT run until you:")
+        logger.warning("  1. Develop a ticker prioritization strategy")
+        logger.warning("  2. Set YFINANCE_DISABLED=0 in your environment")
+        logger.warning("  3. Configure rate limiting via YFINANCE_MAX_RETRIES and YFINANCE_BASE_DELAY")
+        logger.warning("=" * 80)
+        # Allow a minimal connectivity probe if requested
+        if os.environ.get("YFINANCE_MINIMAL", "0") == "1":
+            try:
+                _ = yf.Ticker("AAPL").history(period="5d")
+                logger.info("YFinance minimal query succeeded (AAPL 5d history).")
+            except Exception as e:
+                logger.warning(f"YFinance minimal query failed: {e}")
+        sys.exit(0)
+
+    parser = argparse.ArgumentParser(description="Gather historical stock data using yfinance.")
+    parser.add_argument(
+        "--mode",
+        default="append",
+        choices=['initial_load', 'append', 'full_refresh'],
+        help="The run mode for the data gathering pipeline."
+    )
+    args = parser.parse_args()
+
     try:
         config = AppConfig(calling_script_path=Path(__file__))
     except SystemExit as e:
@@ -523,12 +568,9 @@ if __name__ == "__main__":
         logger.critical(f"Unexpected error loading config: {e}", exc_info=True)
         sys.exit(1)
 
-    # Example: Append using DB_FILE from config
     run_stock_data_pipeline(
         config=config,
-        mode='full_refresh', # Default mode
-        # append_start_date=config.get_optional_var("STOCK_GATHERER_APPEND_START"), # Example optional config
-        # target_tickers=None, # Or load from config/args
+        mode=args.mode,
         db_path_override=None # Use DB from config by default
     )
 

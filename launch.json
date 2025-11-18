@@ -5,50 +5,119 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug: fetch",
+            "name": "MAIN: Run 'all' pipeline",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/fetch_edgar_archives.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["all"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: parse-to-parquet",
+            "name": "STEP: fetch",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/parse_to_parquet.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["fetch"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: load",
+            "name": "STEP: parse-to-parquet",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/edgar_data_loader.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["parse-to-parquet"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: gather-stocks",
+            "name": "STEP: load",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/stock_data_gatherer.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: gather-info",
+            "name": "STEP: gather-info",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/stock_info_gatherer.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["gather-info"],
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Debug: validate",
+            "name": "STEP: load-info",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/validate_edgar_db.py",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load_info"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "STEP: validate",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["validate"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "INSPECT: report only",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "INSPECT: apply (dry-run)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect", "--apply"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "INSPECT: apply (execute)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect", "--apply", "--no-dry-run"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "MAIN: inspect (report only)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "MAIN: inspect --apply (dry-run)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect", "--apply"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "MAIN: inspect --apply (execute)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect", "--apply", "--no-dry-run"],
             "console": "integratedTerminal",
             "justMyCode": true
         }

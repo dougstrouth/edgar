@@ -19,7 +19,6 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 from tqdm import tqdm
 
 # --- BEGIN: Add project root to sys.path ---
-# This allows the script to be run from anywhere and still find the utils module
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 # --- END: Add project root to sys.path ---
@@ -27,8 +26,8 @@ sys.path.append(str(PROJECT_ROOT))
 # --- Import Utilities ---
 from utils.config_utils import AppConfig
 from utils.logging_utils import setup_logging
-import utils.json_parse as json_parse
-import utils.parquet_converter as parquet_converter
+from data_processing import json_parse
+from data_processing import parquet_converter
 
 # --- Constants ---
 DEFAULT_MAX_CPU_IO_WORKERS = 8
@@ -46,15 +45,17 @@ def parse_cik_data_worker(cik: str, submissions_dir: Path, companyfacts_dir: Pat
         "cik": cik, "companies": None, "tickers": [], "former_names": [], "filings": [],
         "xbrl_tags": [], "xbrl_facts": [], "company_entity_name": None, "found_any_file": False
     }
+    relevant_accession_numbers: Set[str] = set()
 
     if submission_json_path.is_file():
         parsed_data_for_cik["found_any_file"] = True
         parsed_submission = json_parse.parse_submission_json_for_db(submission_json_path)
         if parsed_submission:
             parsed_data_for_cik.update(parsed_submission)
-
+    
     if companyfacts_json_path.is_file():
         parsed_data_for_cik["found_any_file"] = True
+        # Pass the set of relevant accession numbers to the facts parser
         parsed_facts = json_parse.parse_company_facts_json_for_db(companyfacts_json_path)
         if parsed_facts:
             parsed_data_for_cik["company_entity_name"] = parsed_facts.get("company_entity_name")
@@ -78,21 +79,11 @@ if __name__ == "__main__":
     # Configure the json_parse logger to be less verbose
     logging.getLogger(json_parse.__name__).setLevel(logging.WARNING)
 
-    max_parsing_workers = config.get_optional_int("MAX_CPU_IO_WORKERS", DEFAULT_MAX_CPU_IO_WORKERS)
+    max_parsing_workers = config.MAX_CPU_IO_WORKERS
 
     logger.info(f"--- Starting EDGAR JSON to Parquet Conversion ---")
+    config.PARQUET_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"Parquet output directory: {config.PARQUET_DIR}")
-
-    # --- Cleanliness Step: Ensure a fresh start ---
-    logger.info(f"Cleaning previous Parquet data from {config.PARQUET_DIR}...")
-    if config.PARQUET_DIR.exists():
-        try:
-            shutil.rmtree(config.PARQUET_DIR)
-            logger.info("Previous Parquet directory successfully removed.")
-        except OSError as e:
-            logger.error(f"Error removing directory {config.PARQUET_DIR}: {e}. Please remove it manually.", exc_info=True)
-            sys.exit(1)
-    logger.info("Parquet directory is clean and ready for new data.")
 
     # Load control toggles
     process_limit = config.get_optional_int("PROCESS_LIMIT", default=None)
@@ -115,16 +106,29 @@ if __name__ == "__main__":
     if process_specific_cik:
         ciks_to_process = [process_specific_cik.zfill(10)]
         logger.warning(f"--- Processing SPECIFIC CIK: {ciks_to_process[0]} ---")
-    elif process_limit:
-        ciks_to_process = all_ciks[:process_limit]
-        logger.warning(f"--- Processing LIMITED set: First {process_limit} CIKs ---")
     else:
-        ciks_to_process = all_ciks
-        logger.info(f"--- Processing ALL {len(all_ciks)} CIKs ---")
+        # Check for already processed CIKs to support incremental updates
+        force_reprocess = config.get_optional_var("FORCE_REPROCESS", default="false").lower() == "true"
+        if force_reprocess:
+            logger.warning("--- FORCE_REPROCESS is true. Reprocessing all CIKs. ---")
+            ciks_to_process = all_ciks
+        else:
+            logger.info("Checking for CIKs that have already been processed into Parquet...")
+            processed_ciks = parquet_converter.get_processed_ciks(config.PARQUET_DIR)
+            if processed_ciks:
+                logger.info(f"Found {len(processed_ciks)} CIKs already in Parquet files.")
+                ciks_to_process = [cik for cik in all_ciks if cik not in processed_ciks]
+                logger.info(f"Found {len(ciks_to_process)} new CIKs to process.")
+            else:
+                ciks_to_process = all_ciks # No processed CIKs found, process all
+
+        if process_limit:
+            ciks_to_process = ciks_to_process[:process_limit]
+            logger.warning(f"--- Processing LIMITED set: First {len(ciks_to_process)} of new CIKs ---")
 
     if not ciks_to_process:
-        logger.error("No CIKs selected for processing. Exiting.")
-        sys.exit(1)
+        logger.info("No new CIKs to process. Exiting.")
+        sys.exit(0)
 
     # --- 2. Parse and Convert in Batches ---
     total_processed_ciks = 0

@@ -106,6 +106,16 @@ class AppConfig:
             self.COMPANYFACTS_DIR: Path = self.EXTRACT_BASE_DIR / "companyfacts"
             self.TICKER_FILE_PATH: Path = self.DOWNLOAD_DIR / "company_tickers.json"
 
+            # --- Performance & Tuning Settings ---
+            self.DUCKDB_MEMORY_LIMIT: str = self.get_optional_var("DUCKDB_MEMORY_LIMIT", '8GB')
+            self.DUCKDB_TEMP_DIR: Optional[Path] = (
+                Path(temp_dir_str).resolve()
+                if (temp_dir_str := self.get_optional_var("DUCKDB_TEMP_DIR"))
+                else None
+            )
+            self.MAX_CPU_IO_WORKERS: int = self.get_optional_int("MAX_CPU_IO_WORKERS", 8)
+
+
             config_logger.info("Core configuration paths loaded successfully.")
             config_logger.info(f"  DOWNLOAD_DIR: {self.DOWNLOAD_DIR}")
             config_logger.info(f"  PARQUET_DIR: {self.PARQUET_DIR}")
