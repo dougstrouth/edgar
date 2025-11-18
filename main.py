@@ -66,13 +66,14 @@ SCRIPTS = {
     "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
     "gather_stocks_polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
+    "gather-stocks-polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
     "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
-    "load_stocks": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "load_info": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "gather_macro": SCRIPT_DIR / "data_gathering/macro_data_gatherer.py",
     "load_macro": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "gather_market_risk": SCRIPT_DIR / "data_gathering/market_risk_gatherer.py",
     "load_market_risk": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "load_stocks": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "feature_eng": SCRIPT_DIR / "data_processing/feature_engineering.py",
     "summarize": SCRIPT_DIR / "data_processing/summarize_filings.py",
     "validate": SCRIPT_DIR / "utils/validate_edgar_db.py",
@@ -140,7 +141,7 @@ def main():
             "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect",
-            "gather_stocks_polygon"
+            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )
@@ -188,6 +189,8 @@ def main():
             final_args = ["yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"] + remaining_args
         elif script_key == "load_market_risk":
             final_args = ["market_risk_factors"] + remaining_args
+        elif script_key == "load_stocks":
+            final_args = ["stock_history"] + remaining_args
 
         if not run_script(script_key, script_args=final_args):
             sys.exit(1)

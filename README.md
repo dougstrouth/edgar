@@ -11,7 +11,8 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
 *   **Atomic Database Updates**: The data loading process uses a "blue-green" deployment strategy. Data is loaded into temporary tables, and only upon successful completion are the live tables atomically swapped. This ensures the database is never left in a corrupted or incomplete state, even if a load fails midway.
 *   **Data Ordering for Performance**: During the database load, the largest tables (`xbrl_facts` and `filings`) are pre-sorted on commonly queried columns (like `cik`, `form`, and `filing_date`). This significantly improves query performance by making DuckDB's automatic zonemap indexes more effective.
 *   **Supplementary Data Integration**:
-    *   **Yahoo Finance**: Fetches historical stock prices (OHLCV), company profile information, financial statements, and corporate actions.
+    *   **Polygon.io (Stocks)**: Fetches historical stock prices (OHLCV) with a generous free tier (5 calls/minute, 1-day delay). Backfills years of daily data reliably.
+    *   **Yahoo Finance**: Fetches company profile information, financial statements, and corporate actions.
     *   **Federal Reserve (FRED)**: Gathers key macroeconomic time-series data (e.g., GDP, CPI, interest rates) to provide economic context for financial models.
 *   **Resilient API Interaction**:
     *   **Intelligent Retries**: Implements exponential backoff with jitter for handling API rate limits from external sources like Yahoo Finance.
@@ -56,13 +57,15 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
     *   `DB_FILE`: The absolute path for the DuckDB database file (e.g., `C:\path\to\data\edgar_analytics.duckdb`).
     *   `SEC_USER_AGENT`: A descriptive User-Agent for making requests to the SEC (e.g., `YourName YourOrg your.email@example.com`). **This is required by the SEC.**
     *   `FRED_API_KEY`: Your API key for the FRED service (optional, if using `gather-macro`).
+    *   `POLYGON_API_KEY`: Your API key from Polygon.io (free tier works). Required for Polygon stock data.
+    *   `POLYGON_MAX_WORKERS` (optional): Parallel workers for the Polygon gatherer (default: 2; free tier is 5 req/min, so keep small).
 
 ## Project Structure
 
 The project is organized into the following directories:
 
 *   `main.py`: The main orchestrator for running pipeline steps.
-*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Yahoo Finance, FRED).
+*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Polygon.io, Yahoo Finance, FRED).
 *   `data_processing/`: Scripts for parsing, cleaning, and loading data into the database.
 *   `analysis/`: Scripts and notebooks for analyzing the data.
 *   `utils/`: Utility scripts for configuration, logging, and database connections.
@@ -113,6 +116,16 @@ python main.py load_macro
 # Gather market risk factors
 python main.py gather_market_risk
 python main.py load_market_risk
+
+# Gather daily OHLCV from Polygon.io (recommended for prices)
+# Option A: direct script
+python data_gathering/stock_data_gatherer_polygon.py --mode initial_load --limit 50
+
+# Option B: orchestrator alias
+python main.py gather-stocks-polygon -- --mode initial_load --limit 50
+
+# Load the gathered prices into DuckDB
+python data_processing/load_supplementary_data.py stock_history
 ```
 
 **Other Commands:**
@@ -130,6 +143,24 @@ python main.py cleanup --all
 ## Database Schema
 
 For a detailed description of all database tables, columns, and their relationships, please see the [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
+
+## Polygon.io Quick Check
+
+Validate connectivity and estimate capacity:
+
+```bash
+python test_polygon_capacity.py
+```
+This checks your `POLYGON_API_KEY`, fetches sample tickers, and estimates effective calls/min under rate limits.
+
+## VS Code Debugging
+
+Launch profiles are included in `.vscode/launch.json`. Ensure your `.env` is present at the workspace root; VS Code will honor it via the project's config loader. Useful entries:
+ - `MAIN: Run 'all' pipeline`
+ - `STEP: fetch`, `parse-to-parquet`, `load`, `validate`
+ - `STEP: gather-stocks-polygon (initial 50)` to exercise Polygon gathering
+
+If you add new steps, consider updating `main.py` choices and `.vscode/launch.json` to keep them aligned.
 
 ## Incremental Parquet Loader
 

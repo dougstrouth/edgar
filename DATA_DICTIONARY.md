@@ -1,6 +1,7 @@
 # EDGAR Analytics - Data Dictionary
 
 This document provides a detailed description of the database schema used in the EDGAR Analytics project. The database stores structured data parsed from SEC EDGAR bulk files and supplementary stock market data from Yahoo Finance.
+It also includes optional daily OHLCV price history gathered from Polygon.io.
 
 ## Database Engine
 
@@ -166,4 +167,39 @@ This document provides a detailed description of the database schema used in the
 | `label` | `VARCHAR` | |
 | `description` | `VARCHAR` | |
 | `rn` | `BIGINT` | |
+
+### `stock_history`
+
+Daily price history for equities. Primary source is Polygon.io (free tier: 1-day delayed, 5 calls/min).
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `ticker` | `VARCHAR` | Ticker symbol (case-insensitive). |
+| `date` | `DATE` | Trading date (UTC). |
+| `open` | `DOUBLE` | Open price (adjusted for splits). |
+| `high` | `DOUBLE` | High price (adjusted). |
+| `low` | `DOUBLE` | Low price (adjusted). |
+| `close` | `DOUBLE` | Close price (adjusted). |
+| `adj_close` | `DOUBLE` | Alias of adjusted close (same as `close` for Polygon daily aggregates). |
+| `volume` | `BIGINT` | Volume. |
+
+Primary Key: `(ticker, date)`
+
+Notes:
+- Parquet files are written under `${PARQUET_DIR}/stock_history` by `data_gathering/stock_data_gatherer_polygon.py`.
+- Load into DuckDB using: `python data_processing/load_supplementary_data.py stock_history`.
+
+### `stock_fetch_errors`
+
+Tracks issues encountered when fetching price data.
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `cik` | `VARCHAR` | Optional CIK if mapped. |
+| `ticker` | `VARCHAR` | Ticker symbol. |
+| `error_timestamp` | `TIMESTAMPTZ` | Time the error was recorded. |
+| `error_type` | `VARCHAR` | Short error category. |
+| `error_message` | `VARCHAR` | Detailed message. |
+| `start_date_req` | `DATE` | Start date requested. |
+| `end_date_req` | `DATE` | End date requested. |
 

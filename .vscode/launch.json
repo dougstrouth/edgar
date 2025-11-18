@@ -8,7 +8,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["all"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: fetch",
@@ -17,7 +18,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["fetch"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: parse-to-parquet",
@@ -26,7 +28,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["parse-to-parquet"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: load",
@@ -35,16 +38,18 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["load"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: gather-info",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
-            "args": ["gather-info"],
+            "args": ["gather_info"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: load-info",
@@ -53,7 +58,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["load_info"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: validate",
@@ -62,7 +68,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["validate"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "STEP: summarize",
@@ -71,7 +78,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["summarize"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "MAIN: inspect (report only)",
@@ -80,7 +88,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["inspect"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "MAIN: inspect --apply (dry-run)",
@@ -89,7 +98,8 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["inspect", "--apply"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "MAIN: inspect --apply (execute)",
@@ -98,7 +108,122 @@
             "program": "${workspaceFolder}/main.py",
             "args": ["inspect", "--apply", "--no-dry-run"],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: gather_stocks (yfinance)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["gather_stocks"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: gather-stocks-polygon (initial 50)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "gather-stocks-polygon", "--",
+                "--mode", "initial_load",
+                "--limit", "50"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: gather_macro",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["gather_macro"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: load_macro (full refresh)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load_macro", "macro_economic_data", "--full-refresh"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: gather_market_risk",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["gather_market_risk"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: load_market_risk (full refresh)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load_market_risk", "market_risk_factors", "--full-refresh"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: feature_eng",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["feature_eng"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: cleanup (all + cache)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["cleanup", "--all", "--cache"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: investigate_orphans",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["investigate_orphans"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "STEP: load_stocks (stock_history)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["load_stocks"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "LOAD: stock_history parquet → DuckDB",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/data_processing/load_supplementary_data.py",
+            "args": ["stock_history"],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env"
         }
     ]
 }

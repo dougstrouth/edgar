@@ -45,7 +45,7 @@ LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
 logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # Constants
-DEFAULT_MAX_WORKERS = 2  # Conservative for API calls
+DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
 BATCH_SIZE = 100  # Number of records before writing to parquet
 LOOKBACK_YEARS = 5  # Default historical data period
 
@@ -107,11 +107,18 @@ def get_latest_stock_dates(
             ticker = row['ticker']
             latest = row['latest_date']
             if pd.notna(latest):
-                # Convert to date object
+                # Normalize to python date object
                 if isinstance(latest, str):
                     latest_dates[ticker] = datetime.fromisoformat(latest).date()
-                else:
+                elif isinstance(latest, pd.Timestamp):
+                    latest_dates[ticker] = latest.date()
+                elif isinstance(latest, datetime):
+                    latest_dates[ticker] = latest.date()
+                elif isinstance(latest, date):
                     latest_dates[ticker] = latest
+                else:
+                    # Fallback: try pandas to_datetime then .date()
+                    latest_dates[ticker] = pd.to_datetime(latest).date()
         
         logger.info(f"Found existing data for {len(latest_dates)} tickers")
         
