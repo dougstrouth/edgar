@@ -233,6 +233,15 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
             df, error_msg = fetch_stock_history(ticker, start_date, end_date, session)
 
             if not error_msg:
+                # CRITICAL: Write to recovery Parquet IMMEDIATELY to preserve precious API data
+                try:
+                    if df is not None:
+                        recovery_file = recovery_dir / f"stock_history_{ticker}_{int(time.time() * 1000)}.parquet"
+                        df.to_parquet(recovery_file, index=False)
+                        logger.info(f"PRESERVED: {ticker} data written to recovery file {recovery_file.name}")
+                except Exception as save_error:
+                    logger.error(f"CRITICAL: Failed to save recovery data for {ticker}: {save_error}")
+                    # Continue anyway - the main writer will still get it
                 return {'status': 'success', 'job': job, 'data': df}
 
             is_retryable = (

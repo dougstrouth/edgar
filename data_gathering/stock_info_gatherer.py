@@ -187,6 +187,10 @@ def _process_financial_statement(statement_df: pd.DataFrame, ticker: str) -> pd.
 def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     Worker function to be run in a process. Fetches all info for a single ticker.
+    
+    CRITICAL: Data preservation is the top priority. Each successful fetch is
+    immediately written to individual recovery Parquet files before being returned,
+    ensuring we never lose hard-won API data even if the process crashes.
     """
     ticker_str = job['ticker']
     
@@ -197,6 +201,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     temp_cache_dir = cache_parent_dir / f"yfinance_{os.getpid()}"
     temp_cache_dir.mkdir(exist_ok=True) # Create the specific process cache dir
     os.environ['YFINANCE_CACHE_DIR'] = str(temp_cache_dir.resolve())
+    
+    # Create a recovery directory for immediate data preservation
+    recovery_dir = cache_parent_dir / "recovery_parquet"
+    recovery_dir.mkdir(exist_ok=True)
 
     try:
         # Make retry parameters configurable via environment variables, with sane defaults
@@ -213,6 +221,25 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
                 df_income = _process_financial_statement(ticker.income_stmt, ticker_str)
                 df_balance = _process_financial_statement(ticker.balance_sheet, ticker_str)
                 df_cashflow = _process_financial_statement(ticker.cashflow, ticker_str)
+
+                # CRITICAL: Write to recovery Parquet IMMEDIATELY to preserve precious API data
+                timestamp = int(time.time() * 1000)
+                try:
+                    if not df_income.empty:
+                        recovery_file = recovery_dir / f"yf_income_{ticker_str}_{timestamp}.parquet"
+                        df_income.to_parquet(recovery_file, index=False)
+                        logger.info(f"PRESERVED: {ticker_str} income statement -> {recovery_file.name}")
+                    if not df_balance.empty:
+                        recovery_file = recovery_dir / f"yf_balance_{ticker_str}_{timestamp}.parquet"
+                        df_balance.to_parquet(recovery_file, index=False)
+                        logger.info(f"PRESERVED: {ticker_str} balance sheet -> {recovery_file.name}")
+                    if not df_cashflow.empty:
+                        recovery_file = recovery_dir / f"yf_cashflow_{ticker_str}_{timestamp}.parquet"
+                        df_cashflow.to_parquet(recovery_file, index=False)
+                        logger.info(f"PRESERVED: {ticker_str} cash flow -> {recovery_file.name}")
+                except Exception as save_error:
+                    logger.error(f"CRITICAL: Failed to save recovery data for {ticker_str}: {save_error}")
+                    # Continue anyway - the main writer will still get it
 
                 # If we get here, it's a success
                 return {
@@ -417,9 +444,17 @@ def run_info_gathering_pipeline(config: AppConfig):
     logger.info(f"Data written to Parquet files in: {config.PARQUET_DIR}")
 
 if __name__ == "__main__":
-    # Optional environment-based guard to disable heavy YF logic by default
+    # CRITICAL: YFinance info gathering is DISABLED by default until we have a prioritization strategy.
+    # The rate limits are severe and we cannot afford to waste API calls on low-priority tickers.
+    # When enabled, all fetched data is written to Parquet IMMEDIATELY to prevent any loss.
     if os.environ.get("YFINANCE_DISABLED", "1") == "1":
-        logger.info("YFinance info gathering disabled by YFINANCE_DISABLED=1; skipping.")
+        logger.warning("=" * 80)
+        logger.warning("YFinance info gathering is DISABLED (YFINANCE_DISABLED=1).")
+        logger.warning("This script will NOT run until you:")
+        logger.warning("  1. Develop a ticker prioritization strategy")
+        logger.warning("  2. Set YFINANCE_DISABLED=0 in your environment")
+        logger.warning("  3. Configure rate limiting via YFINANCE_MAX_RETRIES and YFINANCE_BASE_DELAY")
+        logger.warning("=" * 80)
         if os.environ.get("YFINANCE_MINIMAL", "0") == "1":
             try:
                 _ = yf.Ticker("AAPL").income_stmt
