@@ -1,0 +1,17 @@
+{
+  "cik": "320193",
+  "entityName": "Apple Inc.",
+  "facts": {
+    "us-gaap": {
+      "Revenues": {
+        "label": "Revenues",
+        "description": "Total revenues",
+        "units": {
+          "USD": [
+            {"val": "1000000", "accn": "0001193125-20-000001", "end": "2020-09-26", "fy": 2020, "fp": "FY", "form": "10-K", "filed": "2020-10-30", "frame": ""}
+          ]
+        }
+      }
+    }
+  }
+}

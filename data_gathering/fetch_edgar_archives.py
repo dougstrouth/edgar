@@ -185,27 +185,38 @@ def upsert_archive_records(
         # Insert data into staging
         db_con.executemany(f"INSERT INTO staging_{CATALOG_TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?);", insert_data)
 
-        # Perform MERGE from staging into target table using file_path as key
-        merge_sql = f"""
-            MERGE INTO {CATALOG_TABLE_NAME} AS target
-            USING staging_{CATALOG_TABLE_NAME} AS src
-            ON target.file_path = src.file_path
-            WHEN MATCHED THEN UPDATE SET
-                file_name = src.file_name,
-                url = src.url,
-                size_bytes = src.size_bytes,
-                local_last_modified_utc = src.local_last_modified_utc,
-                download_timestamp_utc = src.download_timestamp_utc,
-                status = src.status
-            WHEN NOT MATCHED THEN INSERT (file_path, file_name, url, size_bytes, local_last_modified_utc, download_timestamp_utc, status)
-            VALUES (src.file_path, src.file_name, src.url, src.size_bytes, src.local_last_modified_utc, src.download_timestamp_utc, src.status);
+        # MERGE isn't available on all DuckDB versions. Use a robust staging +
+        # dedupe approach: union target and staging, pick the latest row per
+        # file_path (by download_timestamp_utc), then replace target rows.
+
+        # Create a merged temp table with deduplication
+        merged_sql = f"""
+            CREATE TEMP TABLE merged_{CATALOG_TABLE_NAME} AS
+            SELECT file_path, file_name, url, size_bytes, local_last_modified_utc, download_timestamp_utc, status FROM (
+                SELECT file_path, file_name, url, size_bytes, local_last_modified_utc, download_timestamp_utc, status,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY file_path
+                         ORDER BY COALESCE(download_timestamp_utc, TIMESTAMP '1970-01-01') DESC,
+                                  src_priority ASC
+                       ) AS rn
+                FROM (
+                    SELECT file_path, file_name, url, size_bytes, local_last_modified_utc, download_timestamp_utc, status, 1 AS src_priority FROM {CATALOG_TABLE_NAME}
+                    UNION ALL
+                    SELECT file_path, file_name, url, size_bytes, local_last_modified_utc, download_timestamp_utc, status, 0 AS src_priority FROM staging_{CATALOG_TABLE_NAME}
+                )
+            ) WHERE rn = 1;
         """
-        db_con.execute(merge_sql)
+        db_con.execute(merged_sql)
 
-        # Clean up staging (TEMP tables are session-scoped; dropping explicitly for clarity)
+        # Replace target rows by deleting and inserting from merged temp table
+        db_con.execute(f"DELETE FROM {CATALOG_TABLE_NAME};")
+        db_con.execute(f"INSERT INTO {CATALOG_TABLE_NAME} SELECT * FROM merged_{CATALOG_TABLE_NAME};")
+
+        # Clean up temp tables
         db_con.execute(f"DROP TABLE IF EXISTS staging_{CATALOG_TABLE_NAME};")
+        db_con.execute(f"DROP TABLE IF EXISTS merged_{CATALOG_TABLE_NAME};")
 
-        logger.info(f"Successfully inserted/updated {len(archive_records)} archive records in catalog via MERGE.")
+        logger.info(f"Successfully inserted/updated {len(archive_records)} archive records in catalog via staging+dedupe.")
     except Exception as e:
         # db_con.rollback() # Handled by ManagedDatabaseConnection
         logger.error(f"Database error during archive record insertion: {e}", exc_info=True)
