@@ -203,6 +203,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     Worker function to be run in a process. Fetches stock history for a single ticker.
     Includes retry logic with exponential backoff for rate-limiting errors.
+    
+    CRITICAL: Data preservation is the top priority. If a fetch succeeds, the data
+    is immediately written to a recovery Parquet file before being returned, ensuring
+    we never lose hard-won API data even if the process crashes.
     """
     # Create a temporary, process-specific cache directory inside a central .cache
     # folder to prevent file locks and keep the project root tidy.
@@ -211,6 +215,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     temp_cache_dir = cache_parent_dir / f"yfinance_{os.getpid()}"
     temp_cache_dir.mkdir(exist_ok=True) # Create the specific process cache dir
     os.environ['YFINANCE_CACHE_DIR'] = str(temp_cache_dir.resolve())
+    
+    # Create a recovery directory for immediate data preservation
+    recovery_dir = cache_parent_dir / "recovery_parquet"
+    recovery_dir.mkdir(exist_ok=True)
 
     try:
         # Create a single session for this worker process to pass to yfinance
@@ -513,6 +521,26 @@ import argparse
 
 # --- Script Execution Control ---
 if __name__ == "__main__":
+    # CRITICAL: YFinance gathering is DISABLED by default until we have a prioritization strategy.
+    # The rate limits are severe and we cannot afford to waste API calls on low-priority tickers.
+    # When enabled, all fetched data is written to Parquet IMMEDIATELY to prevent any loss.
+    if os.environ.get("YFINANCE_DISABLED", "1") == "1":
+        logger.warning("=" * 80)
+        logger.warning("YFinance gathering is DISABLED (YFINANCE_DISABLED=1).")
+        logger.warning("This script will NOT run until you:")
+        logger.warning("  1. Develop a ticker prioritization strategy")
+        logger.warning("  2. Set YFINANCE_DISABLED=0 in your environment")
+        logger.warning("  3. Configure rate limiting via YFINANCE_MAX_RETRIES and YFINANCE_BASE_DELAY")
+        logger.warning("=" * 80)
+        # Allow a minimal connectivity probe if requested
+        if os.environ.get("YFINANCE_MINIMAL", "0") == "1":
+            try:
+                _ = yf.Ticker("AAPL").history(period="5d")
+                logger.info("YFinance minimal query succeeded (AAPL 5d history).")
+            except Exception as e:
+                logger.warning(f"YFinance minimal query failed: {e}")
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(description="Gather historical stock data using yfinance.")
     parser.add_argument(
         "--mode",

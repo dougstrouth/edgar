@@ -66,6 +66,33 @@
             "args": ["validate"],
             "console": "integratedTerminal",
             "justMyCode": true
+        },
+        {
+            "name": "INSPECT: report only",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "INSPECT: apply (dry-run)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect", "--apply"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "INSPECT: apply (execute)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["inspect", "--apply", "--no-dry-run"],
+            "console": "integratedTerminal",
+            "justMyCode": true
         }
     ]
 }

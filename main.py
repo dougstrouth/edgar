@@ -77,6 +77,7 @@ SCRIPTS = {
     "validate": SCRIPT_DIR / "utils/validate_edgar_db.py",
     "cleanup": SCRIPT_DIR / "scripts/cleanup_artifacts.py",
     "investigate_orphans": SCRIPT_DIR / "investigate_orphans.py",
+    "inspect": SCRIPT_DIR / "scripts/downloads_scanner.py",
 }
 
 def run_script_target(script_path, script_args):
@@ -137,7 +138,7 @@ def main():
         choices=[
             "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
-            "gather_market_risk", "load_market_risk", "investigate_orphans"
+            "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )

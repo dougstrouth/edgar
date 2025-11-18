@@ -417,6 +417,17 @@ def run_info_gathering_pipeline(config: AppConfig):
     logger.info(f"Data written to Parquet files in: {config.PARQUET_DIR}")
 
 if __name__ == "__main__":
+    # Optional environment-based guard to disable heavy YF logic by default
+    if os.environ.get("YFINANCE_DISABLED", "1") == "1":
+        logger.info("YFinance info gathering disabled by YFINANCE_DISABLED=1; skipping.")
+        if os.environ.get("YFINANCE_MINIMAL", "0") == "1":
+            try:
+                _ = yf.Ticker("AAPL").income_stmt
+                logger.info("YFinance minimal info query succeeded (AAPL income_stmt).")
+            except Exception as e:
+                logger.warning(f"YFinance minimal info query failed: {e}")
+        sys.exit(0)
+
     try:
         app_config = AppConfig(calling_script_path=Path(__file__))
         run_info_gathering_pipeline(app_config)
