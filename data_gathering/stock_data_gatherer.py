@@ -18,31 +18,34 @@ import logging # Keep for level constants
 import os
 import sys
 import time
-import multiprocessing
-import shutil
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-from datetime import datetime, date, timezone, timedelta
-from typing import Optional, Dict, List, Set, Tuple, Any, Union
+            item = q.get(timeout=FLUSH_TIMEOUT)
 
-import requests
-import duckdb
-import pandas as pd
-import yfinance as yf
-from tqdm import tqdm
+            if item is None: # Sentinel value to signal termination
+                _flush_batch(history_batch, 'stock_history')
+                _flush_batch(errors_batch, 'stock_fetch_errors')
+                logger.info("Writer process received sentinel. Shutting down.")
+                break
 
-
-
-# --- Import Utilities ---
-from utils.config_utils import AppConfig                 # Import configuration loader
-from utils.logging_utils import setup_logging            # Import logging setup function
-from utils.database_conn import ManagedDatabaseConnection
-from data_processing import parquet_converter # Reuse the parquet saving utility
-
-# --- Setup Logging ---
-SCRIPT_NAME = Path(__file__).stem
-LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
-logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
+            data_type, data = item
+            try:
+                if data_type == 'stock_history' and not data.empty:
+                    history_batch.append(data)
+                    if len(history_batch) >= BATCH_SIZE:
+                        _flush_batch(history_batch, 'stock_history')
+                elif data_type == 'stock_fetch_errors' and data:
+                    errors_batch.append(data)
+                    if len(errors_batch) >= BATCH_SIZE:
+                        _flush_batch(errors_batch, 'stock_fetch_errors')
+            except Exception as e:
+                logger.error(f"Writer process failed to handle data of type {data_type}: {e}", exc_info=True)
+        except Exception as e:
+            ename = type(e).__name__
+            if 'Empty' in ename or 'empty' in ename:
+                logger.debug("Writer queue timeout reached, flushing any pending batches...")
+                _flush_batch(history_batch, 'stock_history')
+                _flush_batch(errors_batch, 'stock_fetch_errors')
+                continue
+            logger.error(f"Writer process encountered an unexpected error: {e}", exc_info=True)
 
 # --- Constants ---
 DEFAULT_REQUEST_DELAY = 0.05 # Default 50ms delay
@@ -229,7 +232,16 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         max_retries = int(os.environ.get("YFINANCE_MAX_RETRIES", "5"))
         base_delay = float(os.environ.get("YFINANCE_BASE_DELAY", "15.0")) # Increased base delay for persistent rate-limiting
 
+        # Per-process adaptive limiter (each worker adapts independently)
+        limiter = AdaptiveRateLimiter(base_delay=base_delay)
+
         for attempt in range(max_retries):
+            # Be polite and adaptively delay before each yfinance call
+            try:
+                time.sleep(limiter.get_delay())
+            except Exception:
+                pass
+
             df, error_msg = fetch_stock_history(ticker, start_date, end_date, session)
 
             if not error_msg:
@@ -242,6 +254,11 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
                 except Exception as save_error:
                     logger.error(f"CRITICAL: Failed to save recovery data for {ticker}: {save_error}")
                     # Continue anyway - the main writer will still get it
+                # Inform adaptive limiter of success so it can consider reducing delay
+                try:
+                    limiter.on_success()
+                except Exception:
+                    pass
                 return {'status': 'success', 'job': job, 'data': df}
 
             is_retryable = (
@@ -252,6 +269,11 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
 
             if is_retryable:
                 if attempt < max_retries - 1:
+                    # Let the limiter know we hit a rate limit so it can back off
+                    try:
+                        limiter.on_rate_limit()
+                    except Exception:
+                        pass
                     # Exponential backoff with a random jitter
                     wait_time = base_delay * (2 ** attempt) + (os.urandom(1)[0] / 255.0)
                     logger.warning(f"Retryable error for {ticker} ('{error_msg[:50]}...'). Retrying in {wait_time:.2f}s...")
@@ -294,7 +316,7 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         except OSError as e:
             logger.error(f"Error removing temp cache dir {temp_cache_dir}: {e}")
 
-def writer_process(queue: Any, parquet_dir: Path):
+def writer_process(q: Any, parquet_dir: Path):
     """
     A separate process that listens on a queue for data and writes it to Parquet files.
     This version batches data before writing to improve performance.
@@ -323,7 +345,7 @@ def writer_process(queue: Any, parquet_dir: Path):
     while True:
         try:
             # Wait for an item, but with a timeout to allow for periodic flushing
-            item = queue.get(timeout=FLUSH_TIMEOUT)
+            item = q.get(timeout=FLUSH_TIMEOUT)
 
             if item is None: # Sentinel value to signal termination
                 _flush_batch(history_batch, 'stock_history')
@@ -343,12 +365,14 @@ def writer_process(queue: Any, parquet_dir: Path):
                         _flush_batch(errors_batch, 'stock_fetch_errors')
             except Exception as e:
                 logger.error(f"Writer process failed to handle data of type {data_type}: {e}", exc_info=True)
-        except multiprocessing.queues.Empty:
-            # The queue was empty for the timeout period, a good time to flush any pending data
-            logger.debug("Writer queue timeout reached, flushing any pending batches...")
-            _flush_batch(history_batch, 'stock_history')
-            _flush_batch(errors_batch, 'stock_fetch_errors')
         except Exception as e:
+            ename = type(e).__name__
+            if 'Empty' in ename or 'empty' in ename:
+                # The queue was empty for the timeout period, a good time to flush any pending data
+                logger.debug("Writer queue timeout reached, flushing any pending batches...")
+                _flush_batch(history_batch, 'stock_history')
+                _flush_batch(errors_batch, 'stock_fetch_errors')
+                continue
             logger.error(f"Writer process encountered an unexpected error: {e}", exc_info=True)
 
 # Define constants for table names, now used for directory names
@@ -430,6 +454,14 @@ def run_stock_data_pipeline(
             initial_count = len(tickers_to_process)
             tickers_to_process = [t for t in tickers_to_process if t not in untrackable_tickers]
             skipped_untrackable = initial_count - len(tickers_to_process)
+            # Apply hybrid prioritization (Option C) to order tickers conservatively
+            try:
+                prioritized = prioritize_tickers_hybrid(db_log_path, tickers_to_process)
+                # prioritized is list of (ticker, score)
+                tickers_to_process = [t for t, _ in prioritized]
+                logger.info("Applied hybrid prioritization (option C) to tickers.")
+            except Exception as e:
+                logger.warning(f"Prioritization failed, proceeding with original ordering: {e}")
             total_tickers_to_process = len(tickers_to_process) # Update count
 
             logger.info(f"Preparing {total_tickers_to_process} fetch jobs (skipped {skipped_untrackable} untrackable tickers)...")
@@ -465,6 +497,28 @@ def run_stock_data_pipeline(
                     'end_date': fetch_end_date.strftime('%Y-%m-%d'),
                     'db_path': db_log_path
                 })
+            # --- Daily budget / checkpoint: yf_fetch_status table ---
+            try:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS yf_fetch_status (
+                        fetch_date DATE PRIMARY KEY,
+                        fetched_count INTEGER DEFAULT 0,
+                        attempted_count INTEGER DEFAULT 0
+                    );
+                ''')
+                today = datetime.now(timezone.utc).date()
+                row = conn.execute("SELECT fetched_count FROM yf_fetch_status WHERE fetch_date = ?;", [today]).fetchone()
+                fetched_today = int(row[0]) if row and row[0] is not None else 0
+                daily_limit = config.get_optional_int("YFINANCE_DAILY_LIMIT", 100) or 100
+                remaining = max(0, daily_limit - fetched_today)
+                if remaining <= 0:
+                    logger.info(f"Daily YFinance budget exhausted ({fetched_today}/{daily_limit}). No jobs will be scheduled.")
+                    jobs_to_run = []
+                elif len(jobs_to_run) > remaining:
+                    logger.info(f"Trimming jobs from {len(jobs_to_run)} to daily remaining budget {remaining}.")
+                    jobs_to_run = jobs_to_run[:remaining]
+            except Exception as e:
+                logger.warning(f"Failed to evaluate or initialize yf_fetch_status: {e}")
         # The 'with' block for the DB connection ends here, ensuring it is closed.
     except Exception as e:
         logger.critical(f"Failed during STAGE 1 (Job Preparation): {e}", exc_info=True)
@@ -491,6 +545,22 @@ def run_stock_data_pipeline(
             for future in progress:
                 try:
                     result = future.result()
+                    # Update yf_fetch_status checkpoint (attempted/fetched counts)
+                    try:
+                        with ManagedDatabaseConnection(db_path_override=db_log_path, read_only=False) as write_conn:
+                            if write_conn:
+                                today = datetime.now(timezone.utc).date()
+                                existing = write_conn.execute("SELECT attempted_count, fetched_count FROM yf_fetch_status WHERE fetch_date = ?;", [today]).fetchone()
+                                if existing:
+                                    attempted = (existing[0] or 0) + 1
+                                    fetched = (existing[1] or 0) + (1 if result.get('status') == 'success' else 0)
+                                    write_conn.execute("UPDATE yf_fetch_status SET attempted_count = ?, fetched_count = ? WHERE fetch_date = ?;", [attempted, fetched, today])
+                                else:
+                                    attempted = 1
+                                    fetched = 1 if result.get('status') == 'success' else 0
+                                    write_conn.execute("INSERT INTO yf_fetch_status (fetch_date, fetched_count, attempted_count) VALUES (?, ?, ?);", [today, fetched, attempted])
+                    except Exception:
+                        logger.debug("Could not update yf_fetch_status checkpoint for this result.")
                     if result['status'] == 'success':
                         success_count += 1
                         if result.get('data') is not None and not result['data'].empty:
