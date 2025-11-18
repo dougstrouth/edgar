@@ -131,6 +131,37 @@ python main.py cleanup --all
 
 For a detailed description of all database tables, columns, and their relationships, please see the [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
 
+## Incremental Parquet Loader
+
+The project provides an incremental loader `update_from_parquet.py` which scans the `PARQUET_DIR` (per-table subdirectories) and only applies new Parquet batch files into the DuckDB database. Key features:
+
+- Dry-run mode: run with `--dry-run` to list files that would be processed without writing to the DB.
+- Checkpointing: before making destructive changes to the production DB, the script creates a timestamped checkpoint copy of the existing DB file. Use `--no-checkpoint` to disable this behavior.
+
+Example usage:
+```bash
+# Dry-run: show what would be applied
+python update_from_parquet.py --dry-run
+
+# Apply new Parquet files with a checkpoint copy of the DB created first
+python update_from_parquet.py
+
+# Apply without creating a checkpoint (use with caution)
+python update_from_parquet.py --no-checkpoint
+```
+
+## Testing
+
+The repository includes unit and integration tests under the `tests/` directory. Tests use a virtual environment and the project's test fixtures.
+
+Run the full test suite locally:
+```bash
+source .venv/bin/activate
+python -m pytest tests/ -v
+```
+
+If you add or modify parsing/loader code, run tests frequently. Integration tests create temporary DuckDB instances and temporary Parquet files, so they are safe to run on development machines.
+
 ## Contributing
 
 Contributions are welcome. Please open an issue to discuss any proposed changes or enhancements.
