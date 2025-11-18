@@ -17,6 +17,7 @@ dependencies = [
     "pathlib>=1.0.1",
     "plotly>=6.0.1",
     "pyarrow>=19.0.1",
+    "pytest>=9.0.1",
     "python-dotenv>=1.1.0",
     "requests>=2.32.3",
     "sec-cik-mapper>=2.1.0",
@@ -24,5 +25,6 @@ dependencies = [
     "torch>=2.9.1",
     "tqdm>=4.67.1",
     "transformers>=4.57.1",
+    "typing>=3.10.0.0",
     "yfinance>=0.2.55",
 ]

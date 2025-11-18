@@ -171,7 +171,7 @@ def main():
         for step_name, script_args, timeout in pipeline_steps_with_args:
             if not run_script(step_name, script_args=script_args, timeout=timeout):
                 logger.error(f"Full pipeline stopped due to failure in step: '{step_name}'.")
-                anssys.exit(1)
+                sys.exit(1)
         logger.info("Full pipeline completed successfully!")
     else:
         # Map CLI argument to script key

@@ -1,78 +1,42 @@
-
 import sys
 import json
 from pathlib import Path
 import logging
+import pytest
 
-# Add project root to sys.path to allow importing project modules
+# Ensure project root is importable when tests run from the repository root
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_ROOT))
 
 from utils.config_utils import AppConfig
 from data_processing.json_parse import parse_submission_json_for_db
 
-# Setup a basic logger to see the warnings from the parser
+# Configure logging so parser warnings/errors are visible during test runs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
-# Set the json_parse logger to DEBUG to see detailed parsing messages
 logging.getLogger('data_processing.json_parse').setLevel(logging.DEBUG)
 
 
-def test_specific_cik(cik: str):
+ORPHAN_CIK = "0001108426"
+
+
+def test_parse_submission_json_for_orphan_cik():
+    """Parses a real submission JSON for the known orphan CIK when available.
+
+    If the submission JSON isn't available locally, the test is skipped so CI
+    does not fail for missing external data.
     """
-    Tests the submission JSON parsing for a single CIK to isolate issues.
-    """
-    print(f"--- Testing parser for CIK: {cik} ---")
-    try:
-        config = AppConfig(calling_script_path=Path(__file__))
-        submissions_dir = config.SUBMISSIONS_DIR
-        file_path = submissions_dir / f"CIK{cik}.json"
+    config = AppConfig(calling_script_path=Path(__file__))
+    submissions_dir = config.SUBMISSIONS_DIR
+    file_path = submissions_dir / f"CIK{ORPHAN_CIK}.json"
 
-        if not file_path.is_file():
-            print(f"ERROR: JSON file not found at {file_path}")
-            print("Please run the fetch command first for this CIK:")
-            print(f"python main.py fetch --ciks {cik.lstrip('0')}")
-            return
+    if not file_path.is_file():
+        pytest.skip(f"Submission JSON not found: {file_path}. Run fetch step to create it.")
 
-        print(f"Found file: {file_path}")
-        print("Calling parse_submission_json_for_db...")
-        
-        parsed_data = parse_submission_json_for_db(file_path)
+    parsed_data = parse_submission_json_for_db(file_path)
 
-        if not parsed_data:
-            print("\n--- RESULT ---")
-            print("Parsing returned None. This indicates a critical error during parsing.")
-            return
+    assert parsed_data is not None, "Parser returned None for a valid submission JSON"
+    assert isinstance(parsed_data, dict), "Parsed data should be a dict"
+    assert 'filings' in parsed_data, "Parsed data missing 'filings' key"
 
-        filings = parsed_data.get("filings", [])
-        print("\n--- RESULT ---")
-        print(f"Parsing complete. Found {len(filings)} filings for CIK {cik}.")
-
-        if not filings:
-            print("\nWARNING: No filings were parsed.")
-            print("This is the likely cause of the orphan fact issue.")
-            print("Check the log output above for warnings about 'inconsistent array lengths'.")
-            
-            print("\nTo investigate further, checking the JSON structure...")
-            with open(file_path, 'r') as f:
-                data = json.load(f)
-            recent_filings = data.get('filings', {}).get('recent', {})
-            if recent_filings:
-                print("Lengths of arrays in 'filings.recent':")
-                for key, value in recent_filings.items():
-                    if isinstance(value, list):
-                        print(f"  - {key}: {len(value)}")
-                    else:
-                        print(f"  - {key}: Not a list")
-            else:
-                print("'filings.recent' not found in the JSON.")
-
-    except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    # CIK of the orphaned fact provided
-    ORPHAN_CIK = "0001108426"
-    test_specific_cik(ORPHAN_CIK)
-
+    filings = parsed_data.get('filings', [])
+    assert isinstance(filings, list), "'filings' should be a list"

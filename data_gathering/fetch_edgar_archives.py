@@ -16,23 +16,23 @@ Required .env variables:
 """
 
 import requests
-import os
-import logging # Keep for level constants (e.g., logging.INFO)
+import logging # Re-import logging for type hints and calls
 import time
 import sys
 import zipfile
-import json
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-# from dotenv import load_dotenv # No longer needed here
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from tqdm import tqdm
-import shutil # Keep import if might be needed later, currently unused
-from typing import Optional, List, Dict, Tuple, Any # Added for type hints
+from typing import Optional, List, Dict, Tuple, Any
+import duckdb
 
-import duckdb # Keep original duckdb import if needed for types etc.
+# --- Import Utilities ---
+from utils.config_utils import AppConfig
+from utils.logging_utils import setup_logging
+from utils.database_conn import ManagedDatabaseConnection
 
 # --- BEGIN: Add project root to sys.path ---
 # This allows the script to be run from anywhere and still find the utils module
@@ -40,10 +40,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 # --- END: Add project root to sys.path ---
 
-# --- Import Utilities ---
-from utils.config_utils import AppConfig                 # Import configuration loader
-from utils.logging_utils import setup_logging            # Import logging setup function
-from utils.database_conn import ManagedDatabaseConnection # Import DB context manager
 
 # --- Constants ---
 # SCRIPT_NAME = Path(__file__).stem (defined in __main__)
@@ -91,7 +87,8 @@ def download_file(
                     f.write(chunk)
                     downloaded_bytes += len(chunk)
 
-        if progress_bar: progress_bar.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
         if total_size is not None and total_size > 0 and downloaded_bytes != total_size:
              logger.warning(f"Download size mismatch for {filename}. Expected {total_size}, got {downloaded_bytes}")
@@ -116,8 +113,13 @@ def download_file(
         return None
     finally:
         if progress_bar is not None and not progress_bar.disable:
-            try: progress_bar.close()
-            except Exception: pass
+            try:
+                progress_bar.close()
+            except Exception as e:
+                try:
+                    logger.debug(f"Error closing progress bar: {e}")
+                except Exception:
+                    pass
 
 
 def setup_database_and_table(
@@ -165,23 +167,45 @@ def upsert_archive_records(
     ]
 
     try:
-        # Handled within ManagedDatabaseConnection context
-        # db_con.begin()
-        db_con.executemany(f"""
-            INSERT INTO {CATALOG_TABLE_NAME} (
-                file_path, file_name, url, size_bytes, local_last_modified_utc,
-                download_timestamp_utc, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (file_path) DO UPDATE SET
-                file_name = excluded.file_name,
-                url = excluded.url,
-                size_bytes = excluded.size_bytes,
-                local_last_modified_utc = excluded.local_last_modified_utc,
-                download_timestamp_utc = excluded.download_timestamp_utc,
-                status = excluded.status;
-            """, insert_data)
-        # db_con.commit() # Handled by ManagedDatabaseConnection
-        logger.info(f"Successfully inserted/updated {len(archive_records)} archive records in catalog.")
+        # Use a staging temp table + MERGE for robust upserts. This avoids relying
+        # on ON CONFLICT syntax and provides an atomic, auditable upsert path.
+        # The ManagedDatabaseConnection context will handle transactions/rollback.
+
+        # Create a temporary staging table
+        db_con.execute(f"""CREATE TEMP TABLE IF NOT EXISTS staging_{CATALOG_TABLE_NAME} (
+            file_path VARCHAR,
+            file_name VARCHAR,
+            url VARCHAR,
+            size_bytes BIGINT,
+            local_last_modified_utc TIMESTAMPTZ,
+            download_timestamp_utc TIMESTAMPTZ,
+            status VARCHAR
+        );""")
+
+        # Insert data into staging
+        db_con.executemany(f"INSERT INTO staging_{CATALOG_TABLE_NAME} VALUES (?, ?, ?, ?, ?, ?, ?);", insert_data)
+
+        # Perform MERGE from staging into target table using file_path as key
+        merge_sql = f"""
+            MERGE INTO {CATALOG_TABLE_NAME} AS target
+            USING staging_{CATALOG_TABLE_NAME} AS src
+            ON target.file_path = src.file_path
+            WHEN MATCHED THEN UPDATE SET
+                file_name = src.file_name,
+                url = src.url,
+                size_bytes = src.size_bytes,
+                local_last_modified_utc = src.local_last_modified_utc,
+                download_timestamp_utc = src.download_timestamp_utc,
+                status = src.status
+            WHEN NOT MATCHED THEN INSERT (file_path, file_name, url, size_bytes, local_last_modified_utc, download_timestamp_utc, status)
+            VALUES (src.file_path, src.file_name, src.url, src.size_bytes, src.local_last_modified_utc, src.download_timestamp_utc, src.status);
+        """
+        db_con.execute(merge_sql)
+
+        # Clean up staging (TEMP tables are session-scoped; dropping explicitly for clarity)
+        db_con.execute(f"DROP TABLE IF EXISTS staging_{CATALOG_TABLE_NAME};")
+
+        logger.info(f"Successfully inserted/updated {len(archive_records)} archive records in catalog via MERGE.")
     except Exception as e:
         # db_con.rollback() # Handled by ManagedDatabaseConnection
         logger.error(f"Database error during archive record insertion: {e}", exc_info=True)
@@ -192,7 +216,8 @@ def upsert_archive_records(
 def extract_zip_json_members(
     zip_filepath: Path,
     extract_to_dir: Path,
-    max_workers: int # New parameter for parallelization
+    max_workers: int, # New parameter for parallelization
+    logger: logging.Logger,
 ) -> List[Path]:
     """Extracts all '.json' files from a zip archive to a specified directory."""
     extracted_files = []
@@ -217,7 +242,7 @@ def extract_zip_json_members(
                 futures = {
                     executor.submit(
                         _extract_single_member,
-                        zip_ref, member, extract_to_dir
+                        zip_ref, member, extract_to_dir, logger
                     ): member for member in json_members
                 }
 
@@ -232,9 +257,6 @@ def extract_zip_json_members(
                     except Exception as exc:
                         logger.error(f"Exception during extraction of {member.filename}: {exc}", exc_info=True)
 
-        # Ensure all files are closed before returning
-        if zip_ref:
-            zip_ref.close()
 
         logger.info(f"Finished extraction from {zip_filepath.name}. Extracted {len(extracted_files)} JSON files to {extract_to_dir}")
         return extracted_files
@@ -249,7 +271,7 @@ def extract_zip_json_members(
         logger.error(f"Error opening or processing zip file {zip_filepath.name}: {e}", exc_info=True)
         return []
 
-def _extract_single_member(zip_ref: zipfile.ZipFile, member: zipfile.ZipInfo, extract_to_dir: Path) -> Optional[Path]:
+def _extract_single_member(zip_ref: zipfile.ZipFile, member: zipfile.ZipInfo, extract_to_dir: Path, logger: logging.Logger) -> Optional[Path]:
     """Helper function to extract a single member from a zip file."""
     try:
         target_path = extract_to_dir / Path(member.filename).name
@@ -281,21 +303,35 @@ def get_json_sample_data(
     try:
         with open(json_filepath, 'r', encoding='utf-8') as f:
             first_line = f.readline().strip()
-            if len(first_line) > 20: sample = first_line
-            else: f.seek(0); sample = f.read(max_chars)
-            if len(sample) > max_chars: return sample[:max_chars] + "..."
-            elif len(sample) == 0: logger.warning(f"JSON file is empty: {json_filepath.name}"); return "[Empty File]"
-            else: return sample.replace('\n', ' ').replace('\r', '')
+            if len(first_line) > 20:
+                sample = first_line
+            else:
+                f.seek(0)
+                sample = f.read(max_chars)
+
+            if len(sample) > max_chars:
+                return sample[:max_chars] + "..."
+            elif len(sample) == 0:
+                logger.warning(f"JSON file is empty: {json_filepath.name}")
+                return "[Empty File]"
+            else:
+                return sample.replace('\n', ' ').replace('\r', '')
     except FileNotFoundError:
         logger.error(f"File not found during sampling: {json_filepath}")
         return None
     except UnicodeDecodeError:
         logger.warning(f"Could not decode {json_filepath.name} as UTF-8. Trying latin-1.")
         try:
-            with open(json_filepath, 'r', encoding='latin-1') as f: sample = f.read(max_chars)
-            if len(sample) > max_chars: return sample[:max_chars].replace('\n', ' ').replace('\r', '') + "..."
-            else: return sample.replace('\n', ' ').replace('\r', '')
-        except Exception as e: logger.error(f"Failed to read {json_filepath.name} even with latin-1: {e}"); return "[Error Reading File Content]"
+            with open(json_filepath, 'r', encoding='latin-1') as f:
+                sample = f.read(max_chars)
+
+            if len(sample) > max_chars:
+                return sample[:max_chars].replace('\n', ' ').replace('\r', '') + "..."
+            else:
+                return sample.replace('\n', ' ').replace('\r', '')
+        except Exception as e:
+            logger.error(f"Failed to read {json_filepath.name} even with latin-1: {e}")
+            return "[Error Reading File Content]"
     except Exception as e:
         logger.error(f"Failed to read sample from {json_filepath.name}: {e}", exc_info=True)
         return "[Error Reading File]"
@@ -304,7 +340,8 @@ def get_json_sample_data(
 def extract_and_sample_zip_archive(
     zip_filepath: Path,
     extract_dir: Path,
-    max_workers: int # New parameter
+    max_workers: int, # New parameter
+    logger: logging.Logger,
 ) -> Tuple[str, str | None]:
     """Extracts JSON files from a ZIP archive and gets a sample from the first one."""
     logger.info(f"Processing ZIP archive for extraction and sampling: {zip_filepath.name}")
@@ -313,10 +350,12 @@ def extract_and_sample_zip_archive(
     extract_dir.mkdir(parents=True, exist_ok=True)
 
     # Pass max_workers to extraction function
-    extracted_json_files = extract_zip_json_members(zip_filepath, extract_dir, max_workers)
+    extracted_json_files = extract_zip_json_members(zip_filepath, extract_dir, max_workers, logger)
 
     if not extracted_json_files:
-        if not zip_filepath.exists(): return "Extraction Failed (ZIP Missing)", None
+        if not zip_filepath.exists():
+            return "Extraction Failed (ZIP Missing)", None
+
         logger.warning(f"No JSON files were extracted from {zip_filepath.name}.")
         return "No JSON Found", None
 
@@ -325,8 +364,10 @@ def extract_and_sample_zip_archive(
     # Pass logger to sampling function
     sample_data = get_json_sample_data(first_json_path, logger)
 
-    if sample_data is None: return "Extracted (Sample Failed)", None
-    else: return "Extracted", sample_data
+    if sample_data is None:
+        return "Extracted (Sample Failed)", None
+
+    return "Extracted", sample_data
 
 def _get_file_status(url: str, local_filepath: Path, headers: Dict[str, str], logger: logging.Logger) -> Tuple[bool, str, Optional[datetime]]:
     """
@@ -407,40 +448,66 @@ if __name__ == "__main__":
         sys.exit("Stopping script: Cannot create directories.")
 
     # --- Download Files & Collect Metadata ---
-    download_metadata_list = []
+    download_metadata_list: List[Dict[str, Any]] = []
     current_run_timestamp = datetime.now(timezone.utc)
 
     if args.ciks:
         ciks_to_fetch = [cik.strip() for cik in args.ciks.split(',')]
         logger.info(f"Targeted fetch for CIKs: {ciks_to_fetch}")
+        # Ensure max_cpu_io_workers is an int for extraction
+        workers_for_extraction = max_cpu_io_workers if max_cpu_io_workers is not None else DEFAULT_MAX_CPU_IO_WORKERS
         for cik in ciks_to_fetch:
-            # Pad CIK with leading zeros to 10 digits
             padded_cik = cik.zfill(10)
-            url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
-            filename = f"CIK{padded_cik}.json"
-            local_filepath = config.SUBMISSIONS_DIR / filename
-            
-            # Always download for now, can add HEAD check later if needed
-            downloaded_path = download_file(url, config.SUBMISSIONS_DIR, filename, headers, logger)
+            # Download individual submission JSON
+            submission_url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
+            submission_filename = f"CIK{padded_cik}.json"
+            downloaded_submission_path = download_file(submission_url, config.SUBMISSIONS_DIR, submission_filename, headers, logger)
+            needs_processing = True  # Ensure we process the downloaded file
 
-            if downloaded_path and downloaded_path.is_file():
+            if downloaded_submission_path and downloaded_submission_path.is_file():
                 try:
-                    local_stat = downloaded_path.stat()
+                    local_stat = downloaded_submission_path.stat()
                     file_size = local_stat.st_size
                     local_mtime_dt = datetime.fromtimestamp(local_stat.st_mtime, timezone.utc)
                     status = "Downloaded"
                     
                     download_metadata_list.append({
-                        "file_path": str(downloaded_path.resolve()),
-                        "file_name": filename,
-                        "url": url,
+                        "file_path": str(downloaded_submission_path.resolve()),
+                        "file_name": submission_filename,
+                        "url": submission_url,
                         "size_bytes": file_size,
                         "local_last_modified_utc": local_mtime_dt,
                         "download_timestamp_utc": current_run_timestamp,
                         "status": status
                     })
                 except OSError as e:
-                    logger.error(f"Could not get stats for downloaded file {downloaded_path}: {e}")
+                    logger.error(f"Could not get stats for downloaded file {downloaded_submission_path}: {e}")
+
+            # Download individual company facts JSON
+            companyfacts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{padded_cik}.json"
+            companyfacts_filename = f"CIK{padded_cik}.json"
+            downloaded_companyfacts_path = download_file(companyfacts_url, config.COMPANYFACTS_DIR, companyfacts_filename, headers, logger)
+
+            if downloaded_companyfacts_path and downloaded_companyfacts_path.is_file():
+                try:
+                    local_stat = downloaded_companyfacts_path.stat()
+                    file_size = local_stat.st_size
+                    local_mtime_dt = datetime.fromtimestamp(local_stat.st_mtime, timezone.utc)
+                    status = "Downloaded"
+                    
+                    download_metadata_list.append({
+                        "file_path": str(downloaded_companyfacts_path.resolve()),
+                        "file_name": companyfacts_filename,
+                        "url": companyfacts_url,
+                        "size_bytes": file_size,
+                        "local_last_modified_utc": local_mtime_dt,
+                        "download_timestamp_utc": current_run_timestamp,
+                        "status": status
+                    })
+                except OSError as e:
+                    logger.error(f"Could not get stats for downloaded file {downloaded_companyfacts_path}: {e}")
+
+
 
     else:
         logger.info("Starting file checks and downloads...")
@@ -451,12 +518,14 @@ if __name__ == "__main__":
             archive_stem = local_filepath.stem
             specific_extract_dir = config.EXTRACT_BASE_DIR / archive_stem
 
-            final_filepath = None
-            file_size = None # Initialize
+            final_filepath: Optional[Path] = None
+            download_success = False
 
             # --- File Check / Download Logic (Uses logger) ---
-            needs_download, status, local_mtime_dt = _get_file_status(url, local_filepath, headers, logger)
-            needs_processing = needs_download # Assume any downloaded file needs processing
+            needs_download, status, local_mtime_dt_from_status = _get_file_status(url, local_filepath, headers, logger)
+            
+            # Update local_mtime_dt with the value from _get_file_status if available
+            local_mtime_dt_val: Optional[datetime] = local_mtime_dt_from_status
 
             # If the file is up-to-date, check if it was actually extracted.
             # If not, force processing. This handles cases where the zip exists but JSONs were deleted.
@@ -471,20 +540,27 @@ if __name__ == "__main__":
                 # Pass logger to download function
                 downloaded_path = download_file(url, config.DOWNLOAD_DIR, filename, headers, logger)
                 if downloaded_path and downloaded_path.is_file():
-                     final_filepath = downloaded_path; download_success = True
-                     if status.startswith("Requires Update"): status = "Updated"
-                     elif status.startswith("Requires Download"): status = "Downloaded"
-                     try:
-                          local_stat = final_filepath.stat()
-                          file_size = local_stat.st_size
-                          local_mtime_timestamp = local_stat.st_mtime
-                          local_mtime_dt = datetime.fromtimestamp(local_mtime_timestamp, timezone.utc)
-                     except OSError as e:
-                          logger.error(f"Could not get stats for downloaded file {final_filepath}: {e}")
-                          status = "Failed Post-Download Stat"; download_success = False; needs_processing = False
+                    final_filepath = downloaded_path
+                    download_success = True
+                    if status.startswith("Requires Update"):
+                        status = "Updated"
+                    elif status.startswith("Requires Download"):
+                        status = "Downloaded"
+                    try:
+                        local_stat = final_filepath.stat()
+                        file_size = local_stat.st_size
+                        local_mtime_timestamp = local_stat.st_mtime
+                        local_mtime_dt = datetime.fromtimestamp(local_mtime_timestamp, timezone.utc)
+                    except OSError as e:
+                        logger.error(f"Could not get stats for downloaded file {final_filepath}: {e}")
+                        status = "Failed Post-Download Stat"
+                        download_success = False
+                        needs_processing = False
                 else:
                     logger.warning(f"Download failed for {key}.")
-                    status = "Failed"; download_success = False; needs_processing = False
+                    status = "Failed"
+                    download_success = False
+                    needs_processing = False
             else: # File is up-to-date, not downloaded
                 final_filepath = local_filepath
                 try:
@@ -492,22 +568,22 @@ if __name__ == "__main__":
                 except OSError as e:
                     logger.error(f"Could not get stats for existing file {final_filepath}: {e}")
                     status = "Failed Stat"
-
-
-            # --- Post-Download/Check Processing (Uses logger) ---
-            sample_log_message = ""
+            
+            # Ensure max_cpu_io_workers is an int
+            workers_for_extraction = max_cpu_io_workers if max_cpu_io_workers is not None else DEFAULT_MAX_CPU_IO_WORKERS
+            # ...existing code...
             if final_filepath and final_filepath.is_file() and needs_processing:
                 if final_filepath.suffix.lower() == '.zip':
                     logger.info(f"Processing required for ZIP: {final_filepath.name}")
                     # Pass logger to extraction/sampling function
-                    process_status, sample_data = extract_and_sample_zip_archive(final_filepath, specific_extract_dir, max_cpu_io_workers)
+                    process_status, sample_data = extract_and_sample_zip_archive(final_filepath, specific_extract_dir, workers_for_extraction, logger)
                     status = process_status
                     if sample_data:
                         sample_log_message = f"Sample data from {archive_stem}: {sample_data}" # noqa
                         logger.info(sample_log_message)
                 elif final_filepath.suffix.lower() == '.json':
-                     logger.info(f"File {final_filepath.name} is JSON. No extraction needed.")
-                     needs_processing = False
+                    logger.info(f"File {final_filepath.name} is JSON. No extraction needed.")
+                    needs_processing = False
                 else:
                     logger.debug(f"File {final_filepath.name} is not a ZIP or JSON. Skipping processing.")
                     needs_processing = False
@@ -520,7 +596,8 @@ if __name__ == "__main__":
             else:
                  logger.error(f"Could not reliably catalog metadata for {key} (Status: {status}, Needs Download: {needs_download}, Needs Processing: {needs_processing}).")
                  metadata = { "file_path": str(local_filepath.resolve()), "file_name": filename, "url": url, "size_bytes": None, "local_last_modified_utc": None, "download_timestamp_utc": current_run_timestamp, "status": f"Cataloging Error ({status})" }
-                 if status != "Unknown": download_metadata_list.append(metadata)
+                 if status != "Unknown":
+                    download_metadata_list.append(metadata)
 
             time.sleep(0.1) # Keep polite delay
 
