@@ -69,8 +69,14 @@ SCRIPTS = {
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
     "gather_stocks_polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
     "gather-stocks-polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
+    "enrich_tickers": SCRIPT_DIR / "data_gathering/ticker_enrichment_massive.py",
+    "enrich-tickers": SCRIPT_DIR / "data_gathering/ticker_enrichment_massive.py",
+    "gather_ticker_info": SCRIPT_DIR / "data_gathering/ticker_info_gatherer_polygon.py",
+    "gather-ticker-info": SCRIPT_DIR / "data_gathering/ticker_info_gatherer_polygon.py",
     "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
     "load_info": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "load_ticker_info": SCRIPT_DIR / "data_processing/load_ticker_info.py",
+    "load-ticker-info": SCRIPT_DIR / "data_processing/load_ticker_info.py",
     "gather_macro": SCRIPT_DIR / "data_gathering/macro_data_gatherer.py",
     "load_macro": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "gather_market_risk": SCRIPT_DIR / "data_gathering/market_risk_gatherer.py",
@@ -143,7 +149,9 @@ def main():
             "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect",
-            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks", "generate_backlog"
+            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks", "generate_backlog",
+            "enrich_tickers", "enrich-tickers", "gather_ticker_info", "gather-ticker-info",
+            "load_ticker_info", "load-ticker-info"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )

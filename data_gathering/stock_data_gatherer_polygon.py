@@ -13,6 +13,12 @@ Free tier limits:
 - Previous day's data (1-day delay)
 - Unlimited historical data access
 
+Data Adjustment:
+- REST API data is fetched with adjusted=true (split/dividend adjusted)
+- Flat Files contain unadjusted data and require manual adjustment
+- This script uses the REST API, so all data is pre-adjusted for corporate actions
+- For splits data, use the /v3/reference/splits endpoint
+
 Uses:
 - config_utils.AppConfig for loading configuration from .env
 - logging_utils.setup_logging for standardized logging
@@ -24,6 +30,7 @@ Uses:
 import sys
 import logging
 import argparse
+import time
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
@@ -191,6 +198,71 @@ def get_missing_intervals(
     return intervals
 
 
+def load_parquet_to_db(db_path: str, parquet_dir: Path, logger: logging.Logger) -> None:
+    """Load parquet files from parquet_dir into the stock_history table."""
+    parquet_files = list(parquet_dir.glob("polygon_batch_*.parquet"))
+    
+    if not parquet_files:
+        logger.info("No parquet files to load")
+        return
+    
+    logger.info(f"Loading {len(parquet_files)} parquet files into database...")
+    
+    with ManagedDatabaseConnection(db_path_override=db_path, read_only=False) as con:
+        if not con:
+            raise RuntimeError("Failed to connect to database")
+        
+        # Check if table exists
+        table_exists = False
+        try:
+            con.execute("SELECT COUNT(*) FROM stock_history LIMIT 1")
+            table_exists = True
+        except:
+            pass
+        
+        if not table_exists:
+            # Create table if not exists
+            con.execute("""
+                CREATE TABLE stock_history (
+                    ticker VARCHAR,
+                    date DATE,
+                    open DOUBLE,
+                    high DOUBLE,
+                    low DOUBLE,
+                    close DOUBLE,
+                    adj_close DOUBLE,
+                    volume BIGINT
+                )
+            """)
+            logger.info("Created stock_history table")
+        
+        # Load each parquet file
+        records_loaded = 0
+        for pq_file in parquet_files:
+            try:
+                # Count records before insert
+                before_count = con.execute("SELECT COUNT(*) FROM stock_history").fetchone()[0]
+                
+                # Load parquet file directly - only insert new records
+                con.execute(f"""
+                    INSERT INTO stock_history 
+                    SELECT * FROM read_parquet('{pq_file}')
+                    WHERE (ticker, date) NOT IN (
+                        SELECT ticker, date FROM stock_history
+                    )
+                """)
+                
+                # Count records after insert
+                after_count = con.execute("SELECT COUNT(*) FROM stock_history").fetchone()[0]
+                count = after_count - before_count
+                records_loaded += count
+                logger.debug(f"Loaded {count} new records from {pq_file.name}")
+            except Exception as e:
+                logger.error(f"Failed to load {pq_file.name}: {e}")
+        
+        logger.info(f"Loaded {records_loaded} total new records into stock_history table")
+
+
 def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     Worker function to fetch data for a single ticker.
@@ -307,7 +379,26 @@ def run_polygon_pipeline(
             logger.critical("Failed to connect to database")
             return
         
-        # If a plan table is provided, load tickers (and defer job creation later)
+        # Auto-detect prioritized backlog table if not explicitly provided
+        backlog_table = "prioritized_tickers_stock_backlog"
+        if plan_table is None:
+            # Check if the backlog table exists
+            try:
+                table_exists = con.execute(
+                    f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{backlog_table}'"
+                ).fetchone()[0] > 0
+                
+                if table_exists:
+                    logger.info(f"✓ Found prioritized backlog table '{backlog_table}'")
+                    plan_table = backlog_table
+                else:
+                    logger.warning(f"⚠️  Backlog table '{backlog_table}' not found.")
+                    logger.warning(f"   Run 'python main.py generate_backlog' to create it.")
+                    logger.warning(f"   Falling back to on-the-fly prioritization...")
+            except Exception as e:
+                logger.warning(f"Could not check for backlog table: {e}")
+        
+        # If a plan table is available, load tickers from it
         if plan_table:
             logger.info(f"Using plan table '{plan_table}' for ticker sourcing.")
             try:
@@ -363,17 +454,24 @@ def run_polygon_pipeline(
     
     # Create jobs
     jobs: List[Dict[str, Any]] = []
+    
     if plan_table:
-        logger.info(f"Building jobs directly from plan table '{plan_table}' (skipping interval gap analysis).")
+        # Use the plan table (with start_date/end_date columns)
+        logger.info(f"Building jobs from plan table '{plan_table}' (includes date ranges).")
         with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con_plan:
             if not con_plan:
                 logger.critical("Database connection failed when reading plan table for job creation.")
                 return
             try:
-                rows = con_plan.execute(f"SELECT ticker, start_date, end_date FROM {plan_table} ORDER BY rank").fetchall()
+                # Filter plan table by the limited ticker list
+                ticker_list = ','.join(f"'{t}'" for t in tickers)
+                rows = con_plan.execute(f"SELECT ticker, start_date, end_date FROM {plan_table} WHERE ticker IN ({ticker_list}) ORDER BY rank").fetchall()
             except Exception as e:
                 logger.critical(f"Failed to read plan rows: {e}")
+                logger.critical(f"Expected columns: ticker, start_date, end_date, rank")
+                logger.critical(f"Hint: Regenerate the backlog with 'python main.py generate_backlog'")
                 return
+            
             for ticker, sdt, edt in rows:
                 # Normalize types to date
                 def to_date(val):
@@ -384,11 +482,18 @@ def run_polygon_pipeline(
                         return datetime.fromisoformat(str(val)).date()
                     except Exception:
                         return None
-                start_d = to_date(sdt) or (date.today() - timedelta(days=365*lookback_years))
-                end_d = to_date(edt) or (date.today() - timedelta(days=1))
-                if start_d > end_d:
-                    logger.debug(f"Skipping {ticker} (plan start > end)")
+                
+                start_d = to_date(sdt)
+                end_d = to_date(edt)
+                
+                # Validate dates
+                if not start_d or not end_d:
+                    logger.debug(f"Skipping {ticker} (invalid dates: start={sdt}, end={edt})")
                     continue
+                if start_d > end_d:
+                    logger.debug(f"Skipping {ticker} (start > end)")
+                    continue
+                
                 jobs.append({
                     'ticker': ticker,
                     'start_date': start_d,
@@ -397,6 +502,7 @@ def run_polygon_pipeline(
                 })
         logger.info(f"Created {len(jobs)} jobs from plan table.")
     else:
+        # No plan table - do intelligent gap analysis per ticker
         skipped_fully_up_to_date = 0
         total_intervals_created = 0
         with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con_check:
@@ -441,31 +547,75 @@ def run_polygon_pipeline(
         logger.info("No jobs to process (all tickers up to date)")
         return
     
+    # Start timer
+    pipeline_start_time = time.time()
+    max_runtime_seconds = 9 * 60 * 60  # 9 hours
+    
+    logger.info(f"⏰ Pipeline will run for maximum {max_runtime_seconds / 3600:.1f} hours")
+    logger.info(f"📊 Total jobs to process: {len(jobs)}")
+    
     # Process jobs
     success_count = 0
     error_count = 0
     empty_count = 0
+    jobs_processed = 0
     
     # Collect data for batch writing
     data_batch = []
+    
+    # Track last write to database
+    last_db_write_time = time.time()
+    db_write_interval = 15 * 60  # Write to DB every 15 minutes
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(fetch_worker, job): job for job in jobs}
         
         for future in as_completed(futures):
+            # Check timeout
+            elapsed_time = time.time() - pipeline_start_time
+            if elapsed_time > max_runtime_seconds:
+                logger.warning(f"⏰ Reached maximum runtime of {max_runtime_seconds / 3600:.1f} hours")
+                logger.warning(f"   Processed {jobs_processed}/{len(jobs)} jobs before timeout")
+                logger.warning(f"   Stopping gracefully and writing accumulated data...")
+                break
+            
             result = future.result()
+            jobs_processed += 1
+            
+            # Progress reporting
+            if jobs_processed % 50 == 0 or jobs_processed == len(jobs):
+                progress_pct = (jobs_processed / len(jobs)) * 100
+                elapsed_hours = elapsed_time / 3600
+                remaining_hours = (max_runtime_seconds - elapsed_time) / 3600
+                logger.info(f"📈 Progress: {jobs_processed}/{len(jobs)} ({progress_pct:.1f}%) | "
+                           f"Elapsed: {elapsed_hours:.1f}h | Remaining: {remaining_hours:.1f}h | "
+                           f"Success: {success_count}, Empty: {empty_count}, Errors: {error_count}")
             
             if result['status'] == 'success':
                 success_count += 1
                 data_batch.append(result['data'])
                 
-                # Write batch if we've accumulated enough
-                if len(data_batch) >= BATCH_SIZE:
+                # Write batch if we've accumulated enough OR if it's time for periodic DB write
+                should_write_batch = len(data_batch) >= BATCH_SIZE
+                should_write_db = (time.time() - last_db_write_time) >= db_write_interval
+                
+                if should_write_batch or (should_write_db and data_batch):
                     combined_df = pd.concat(data_batch, ignore_index=True)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = parquet_dir / f"polygon_batch_{timestamp}.parquet"
                     combined_df.to_parquet(filename, index=False, engine='pyarrow')
                     logger.info(f"📦 Wrote batch of {len(combined_df)} records to {filename.name}")
+                    
+                    # Load to database periodically
+                    if should_write_db:
+                        logger.info(f"💾 Loading data to database (periodic checkpoint)...")
+                        try:
+                            load_parquet_to_db(config.DB_FILE_STR, parquet_dir, logger)
+                            last_db_write_time = time.time()
+                            logger.info(f"✅ Database updated successfully")
+                        except Exception as e:
+                            logger.error(f"Failed to load to database: {e}")
+                    
                     data_batch = []
                     
             elif result['status'] == 'empty':
@@ -481,16 +631,27 @@ def run_polygon_pipeline(
         combined_df.to_parquet(filename, index=False, engine='pyarrow')
         logger.info(f"📦 Wrote final batch of {len(combined_df)} records to {filename.name}")
     
+    # Final database load
+    logger.info(f"💾 Loading all data to database (final load)...")
+    try:
+        load_parquet_to_db(config.DB_FILE_STR, parquet_dir, logger)
+        logger.info(f"✅ Final database load completed successfully")
+    except Exception as e:
+        logger.error(f"Failed final database load: {e}")
+    
+    # Calculate runtime
+    total_runtime = time.time() - pipeline_start_time
+    runtime_hours = total_runtime / 3600
+    
     logger.info("=" * 80)
     logger.info("Pipeline Complete")
-    logger.info(f"Success: {success_count}")
-    logger.info(f"Empty: {empty_count}")
-    logger.info(f"Errors: {error_count}")
-    logger.info(f"Parquet files written to: {parquet_dir}")
+    logger.info(f"⏱️  Total Runtime: {runtime_hours:.2f} hours ({total_runtime:.0f} seconds)")
+    logger.info(f"📊 Jobs Processed: {jobs_processed}/{len(jobs)}")
+    logger.info(f"✅ Success: {success_count}")
+    logger.info(f"⚠️  Empty: {empty_count}")
+    logger.info(f"❌ Errors: {error_count}")
+    logger.info(f"📁 Parquet files written to: {parquet_dir}")
     logger.info("=" * 80)
-    logger.info("\nNext steps:")
-    logger.info("  1. Load parquet data: python data_processing/load_supplementary_data.py stock_history")
-    logger.info("  2. Or use existing loader: python data_processing/load_supplementary_data.py stock_history")
 
 
 if __name__ == "__main__":

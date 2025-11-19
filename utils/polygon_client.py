@@ -6,7 +6,7 @@ Provides a clean interface for fetching stock data from Massive.com with:
 - Automatic rate limiting (5 calls/minute for free tier)
 - Retry logic with exponential backoff
 - Error handling and logging
-- Support for daily aggregates (bars) API
+- Support for v2 aggregates (OHLCV data) and v3 reference data (tickers, details)
 
 Note: Polygon.io rebranded as Massive.com on Oct 30, 2025.
 Existing API keys continue to work. The API now defaults to api.massive.com,
@@ -16,6 +16,10 @@ Free tier limits:
 - 5 API calls per minute
 - Previous day's data (1 day delay)
 - Unlimited historical data
+
+API Versions:
+- v2: Aggregates (OHLCV bars) - /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
+- v3: Reference data (tickers, details) - /v3/reference/tickers
 """
 
 import time
@@ -206,7 +210,11 @@ class PolygonClient:
         Example:
             bars = client.get_aggregates('AAPL', date(2023, 1, 1), date(2023, 12, 31))
         """
-        endpoint = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+        # Ensure dates are in YYYY-MM-DD format (not datetime with time)
+        from_str = from_date.strftime('%Y-%m-%d') if hasattr(from_date, 'strftime') else str(from_date)
+        to_str = to_date.strftime('%Y-%m-%d') if hasattr(to_date, 'strftime') else str(to_date)
+        
+        endpoint = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_str}/{to_str}"
         
         params = {
             'adjusted': 'true',  # Adjust for splits
@@ -233,13 +241,15 @@ class PolygonClient:
     
     def get_ticker_details(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
-        Get details/info for a ticker (company name, market, sector, etc).
+        Get details/info for a ticker using v3 API (company name, market, sector, etc).
         
         Args:
             ticker: Stock ticker symbol
             
         Returns:
-            Dictionary with ticker details or None if not found
+            Dictionary with ticker details including: name, market, locale, 
+            primary_exchange, type, active status, cik, currency, etc.
+            Returns None if not found
         """
         endpoint = f"/v3/reference/tickers/{ticker}"
         
@@ -249,6 +259,142 @@ class PolygonClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch details for {ticker}: {e}")
             return None
+    
+    def get_all_tickers(
+        self, 
+        active: bool = True,
+        market: str = "stocks",
+        limit: int = 1000
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all available tickers using v3 API with pagination support.
+        
+        Args:
+            active: Only return actively traded tickers (default: True)
+            market: Market type - 'stocks', 'crypto', 'fx', 'otc', 'indices' (default: stocks)
+            limit: Results per page (max 1000, default 1000)
+            
+        Returns:
+            List of ticker dictionaries with details (ticker, name, market, active, cik, etc)
+            
+        Example:
+            all_stocks = client.get_all_tickers(active=True, market='stocks')
+        """
+        endpoint = "/v3/reference/tickers"
+        params = {
+            'active': str(active).lower(),
+            'market': market,
+            'limit': limit,
+            'order': 'asc',
+            'sort': 'ticker'
+        }
+        
+        all_results = []
+        page = 1
+        try:
+            while True:
+                # Apply rate limiting
+                self.rate_limiter.wait_if_needed()
+                
+                # Make request
+                response = self.session.get(
+                    f"{self.BASE_URL}{endpoint}",
+                    params=params,
+                    timeout=30
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                results = data.get('results', [])
+                if not results:
+                    break
+                    
+                all_results.extend(results)
+                logger.info(f"Page {page}: fetched {len(results)} tickers (total: {len(all_results)})")
+                
+                # Check for next page using next_url
+                next_url = data.get('next_url')
+                if not next_url:
+                    break
+                
+                # Parse cursor from next_url and update params
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(next_url)
+                query_params = parse_qs(parsed.query)
+                cursor = query_params.get('cursor', [None])[0]
+                
+                if not cursor:
+                    break
+                    
+                params['cursor'] = cursor
+                page += 1
+                
+            logger.info(f"Retrieved {len(all_results)} total tickers across {page} pages")
+            return all_results
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch tickers: {e}")
+            return all_results  # Return what we got so far
+    
+    def is_ticker_valid(self, ticker: str) -> bool:
+        """
+        Check if a ticker is valid and actively traded using v3 API.
+        
+        Args:
+            ticker: Stock ticker symbol
+            
+        Returns:
+            True if ticker exists and is active, False otherwise
+        """
+        details = self.get_ticker_details(ticker)
+        if not details:
+            return False
+        return details.get('active', False)
+    
+    @staticmethod
+    def format_ticker_for_db(ticker_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Format v3 ticker API response for database storage.
+        
+        Args:
+            ticker_data: Raw ticker data from v3 API
+            
+        Returns:
+            Dictionary with keys matching the tickers table schema
+            
+        Example:
+            data = client.get_ticker_details('AAPL')
+            formatted = PolygonClient.format_ticker_for_db(data)
+        """
+        from datetime import datetime
+        
+        def parse_timestamp(ts_str):
+            """Parse UTC timestamp string to datetime."""
+            if not ts_str:
+                return None
+            try:
+                return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+            except Exception:
+                return None
+        
+        return {
+            'ticker': ticker_data.get('ticker'),
+            'cik': ticker_data.get('cik'),
+            'name': ticker_data.get('name'),
+            'market': ticker_data.get('market'),
+            'locale': ticker_data.get('locale'),
+            'primary_exchange': ticker_data.get('primary_exchange'),
+            'type': ticker_data.get('type'),
+            'active': ticker_data.get('active'),
+            'currency_name': ticker_data.get('currency_name'),
+            'currency_symbol': ticker_data.get('currency_symbol'),
+            'base_currency_name': ticker_data.get('base_currency_name'),
+            'base_currency_symbol': ticker_data.get('base_currency_symbol'),
+            'composite_figi': ticker_data.get('composite_figi'),
+            'share_class_figi': ticker_data.get('share_class_figi'),
+            'last_updated_utc': parse_timestamp(ticker_data.get('last_updated_utc')),
+            'delisted_utc': parse_timestamp(ticker_data.get('delisted_utc'))
+        }
     
     def get_previous_close(self, ticker: str) -> Optional[Dict[str, Any]]:
         """

@@ -151,7 +151,14 @@ SELECT ticker, cik, unique_tag_count, key_metric_count, last_date, record_count,
        recent_filings, stock_need_score, staleness_days, score,
        ROW_NUMBER() OVER (ORDER BY score DESC) AS rank,
        CURRENT_TIMESTAMP AS generated_at,
-       '{json.dumps(w)}' AS weights_json
+       '{json.dumps(w)}' AS weights_json,
+       -- Add suggested date ranges for data fetching
+       CASE 
+           WHEN last_date IS NULL THEN CURRENT_DATE - INTERVAL 5 YEAR
+           WHEN date_diff('day', last_date, CURRENT_DATE) > 7 THEN last_date + INTERVAL 1 DAY
+           ELSE CURRENT_DATE - INTERVAL 5 YEAR
+       END AS start_date,
+       CURRENT_DATE - INTERVAL 1 DAY AS end_date
 FROM final
 ORDER BY score DESC;
 """
@@ -159,7 +166,7 @@ ORDER BY score DESC;
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate prioritized backlog table for stock data gathering.")
-    parser.add_argument('--limit', type=int, default=1200, help='Row limit to persist (post ranking).')
+    parser.add_argument('--limit', type=int, default=None, help='Row limit to persist (post ranking). Default: save all tickers.')
     parser.add_argument('--weights', type=str, default=None, help='Comma list of weight assignments e.g. xbrl_richness=0.3,key_metrics=0.2,stock_data_need=0.35,filing_activity=0.15')
     parser.add_argument('--db-path', type=str, default=None, help='Override DuckDB path (otherwise from AppConfig).')
     args = parser.parse_args()
@@ -176,7 +183,7 @@ def main() -> None:
     weights = parse_weights(args.weights)
     logger.info(f"Using DB: {db_path}")
     logger.info(f"Weights: {weights}")
-    logger.info(f"Row limit: {args.limit}")
+    logger.info(f"Row limit: {args.limit if args.limit else 'ALL'}")
 
     con = duckdb.connect(db_path, read_only=False)
     query = build_query(weights)
@@ -185,7 +192,7 @@ def main() -> None:
     logger.info(f"Scored {len(df)} candidate backlog tickers.")
 
     # Apply limit and persist
-    limited_df = df.head(args.limit).copy()
+    limited_df = df.head(args.limit).copy() if args.limit else df.copy()
     con.execute("DROP TABLE IF EXISTS prioritized_tickers_stock_backlog")
     con.register("limited_df", limited_df)
     con.execute("CREATE TABLE prioritized_tickers_stock_backlog AS SELECT * FROM limited_df")

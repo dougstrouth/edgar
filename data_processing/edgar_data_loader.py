@@ -50,8 +50,32 @@ SCHEMA = {
         );""",
     "tickers": """
         CREATE TABLE IF NOT EXISTS tickers (
-            cik VARCHAR(10) NOT NULL, ticker VARCHAR NOT NULL COLLATE NOCASE, exchange VARCHAR NOT NULL COLLATE NOCASE, source VARCHAR
+            cik VARCHAR(10) NOT NULL,
+            ticker VARCHAR NOT NULL COLLATE NOCASE,
+            exchange VARCHAR NOT NULL COLLATE NOCASE,
+            source VARCHAR
             -- PK handled by INSERT OR REPLACE logic, FKs slow down bulk loads
+        );""",
+    "massive_tickers": """
+        CREATE TABLE IF NOT EXISTS massive_tickers (
+            ticker VARCHAR PRIMARY KEY COLLATE NOCASE,
+            cik VARCHAR(10),
+            name VARCHAR,
+            market VARCHAR,
+            locale VARCHAR,
+            primary_exchange VARCHAR,
+            type VARCHAR,
+            active BOOLEAN,
+            currency_name VARCHAR,
+            currency_symbol VARCHAR,
+            base_currency_name VARCHAR,
+            base_currency_symbol VARCHAR,
+            composite_figi VARCHAR,
+            share_class_figi VARCHAR,
+            last_updated_utc TIMESTAMP,
+            delisted_utc TIMESTAMP,
+            source VARCHAR DEFAULT 'massive.com_v3_api',
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );""",
     "former_names": """
         CREATE TABLE IF NOT EXISTS former_names (
