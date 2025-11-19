@@ -116,7 +116,7 @@ WITH fact_metrics AS (
            fm.unique_tag_count, fm.key_metric_count,
            sh.last_date, sh.record_count,
            COALESCE(rf.recent_filings, 0) AS recent_filings
-    FROM tickers t
+    FROM updated_ticker_info t
     JOIN fact_metrics fm USING(cik)
     LEFT JOIN stock_hist sh ON sh.ticker = t.ticker
     LEFT JOIN recent_filings rf USING(cik)

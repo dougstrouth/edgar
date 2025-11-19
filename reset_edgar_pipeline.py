@@ -21,10 +21,11 @@ import shutil
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.append(str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.config_utils import AppConfig
-from utils.logging_utils import setup_logging
+# Import after path setup
+from utils.config_utils import AppConfig  # noqa: E402
+from utils.logging_utils import setup_logging  # noqa: E402
 
 
 def reset_edgar_pipeline(config: AppConfig, logger):
@@ -73,7 +74,8 @@ def reset_edgar_pipeline(config: AppConfig, logger):
         # Drop EDGAR tables
         for table in edgar_tables:
             if table in existing_table_names:
-                row_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                result = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                row_count = result[0] if result else 0
                 logger.info(f"Dropping table '{table}' ({row_count:,} rows)...")
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
             else:
@@ -83,7 +85,8 @@ def reset_edgar_pipeline(config: AppConfig, logger):
         logger.info("\n--- Preserved Tables (Stock Data) ---")
         for table in preserve_tables:
             if table in existing_table_names:
-                row_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                result = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                row_count = result[0] if result else 0
                 logger.info(f"✓ Keeping '{table}': {row_count:,} rows")
         
         conn.close()
