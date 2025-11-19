@@ -4,7 +4,7 @@ This guide explains how to test YFinance API capacity to determine optimal setti
 
 ## Background
 
-Yahoo Finance has strict rate limits that aren't publicly documented. The `test_yfinance_capacity.py` script helps you:
+Yahoo Finance has strict rate limits that aren't publicly documented. The `tests/test_yfinance_capacity.py` script helps you:
 
 1. Test how many tickers you can fetch before hitting rate limits
 2. Determine optimal batch sizes and delays
@@ -24,7 +24,7 @@ Yahoo Finance has strict rate limits that aren't publicly documented. The `test_
 Tests 3 small batches (5, 10, 15 tickers) with varying delays:
 
 ```bash
-python test_yfinance_capacity.py --test-type quick
+python tests/test_yfinance_capacity.py --test-type quick
 ```
 
 **Use when:** You want a fast sanity check (~1-2 minutes)
@@ -34,7 +34,7 @@ python test_yfinance_capacity.py --test-type quick
 Tests 4 batches (10, 20, 30, 50 tickers) with progressive delays:
 
 ```bash
-python test_yfinance_capacity.py --test-type medium
+python tests/test_yfinance_capacity.py --test-type medium
 ```
 
 **Use when:** You want better data without a long wait (~5-10 minutes)
@@ -44,7 +44,7 @@ python test_yfinance_capacity.py --test-type medium
 Tests 7 batches from 10 to 200 tickers with adaptive delays:
 
 ```bash
-python test_yfinance_capacity.py --test-type extensive
+python tests/test_yfinance_capacity.py --test-type extensive
 ```
 
 **Use when:** You need comprehensive data for production settings (~30-60 minutes)
@@ -54,7 +54,7 @@ python test_yfinance_capacity.py --test-type extensive
 Limit the number of tickers loaded from the database:
 
 ```bash
-python test_yfinance_capacity.py --test-type medium --max-tickers 200
+python tests/test_yfinance_capacity.py --test-type medium --max-tickers 200
 ```
 
 ## Understanding the Output

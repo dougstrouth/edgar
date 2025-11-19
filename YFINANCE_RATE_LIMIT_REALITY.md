@@ -21,7 +21,7 @@ YFinance has **extremely aggressive rate limits** that are not publicly document
 You must wait for the rate limit to reset. Try:
 - **Minimum: 6 hours** from your last request
 - **Safe: 24 hours** to be sure
-- **Test first**: Always run `python test_yfinance_simple.py` before gathering
+- **Test first**: Always run `python tests/test_yfinance_simple.py` before gathering
 
 ### Testing Timeline
 
@@ -143,7 +143,7 @@ tail -f data_gathering/logs/stock_data_gatherer*.log
 Before attempting any YFinance gathering:
 
 - [ ] Waited at least 6 hours (24 hours safer)
-- [ ] Ran `python test_yfinance_simple.py` successfully
+- [ ] Ran `python tests/test_yfinance_simple.py` successfully
 - [ ] Set `YFINANCE_BASE_DELAY=60.0` or higher
 - [ ] Prioritized tickers (use top 50-100 only)
 - [ ] Set up monitoring/logging

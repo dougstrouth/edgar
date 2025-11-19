@@ -64,6 +64,8 @@ SCRIPTS = {
     "parse-to-parquet": SCRIPT_DIR / "data_processing/parse_to_parquet.py",
     "json_to_duckdb": SCRIPT_DIR / "data_processing/json_to_duckdb_refactored.py",
     "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py",
+    "generate_backlog": SCRIPT_DIR / "scripts/generate_prioritized_backlog.py",
+    "stage_fetch_plan": SCRIPT_DIR / "scripts/stage_stock_fetch_plan.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
     "gather_stocks_polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
     "gather-stocks-polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
@@ -141,7 +143,7 @@ def main():
             "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect",
-            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks"
+            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks", "generate_backlog"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
     )

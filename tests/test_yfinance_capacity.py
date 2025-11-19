@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-YFinance Capacity Test Script
+Yahoo Finance Rate Limit and Capacity Testing Script
 
-Tests how much data can be gathered from YFinance before hitting rate limits.
-Uses the prioritizer to get the most valuable tickers first, then gradually
-increases batch sizes to find the optimal gathering rate.
+Tests the yfinance library to understand actual rate limits and estimate
+data gathering capacity for your environment.
 
 Usage:
-    python test_yfinance_capacity.py --test-type [quick|medium|extensive]
+    python tests/test_yfinance_capacity.py --test-type [quick|medium|extensive]
 """
 
 import sys

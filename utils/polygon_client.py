@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Polygon.io API Client Utility
+Massive.com (formerly Polygon.io) API Client Utility
 
-Provides a clean interface for fetching stock data from Polygon.io with:
+Provides a clean interface for fetching stock data from Massive.com with:
 - Automatic rate limiting (5 calls/minute for free tier)
 - Retry logic with exponential backoff
 - Error handling and logging
 - Support for daily aggregates (bars) API
+
+Note: Polygon.io rebranded as Massive.com on Oct 30, 2025.
+Existing API keys continue to work. The API now defaults to api.massive.com,
+while api.polygon.io remains supported for backward compatibility.
 
 Free tier limits:
 - 5 API calls per minute
@@ -25,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 class PolygonRateLimiter:
     """
-    Rate limiter for Polygon.io API.
+    Rate limiter for Massive.com (formerly Polygon.io) API.
     Free tier: 5 calls per minute.
     """
     
@@ -52,12 +56,15 @@ class PolygonRateLimiter:
 
 class PolygonClient:
     """
-    Client for Polygon.io REST API.
+    Client for Massive.com (formerly Polygon.io) REST API.
     
-    Documentation: https://polygon.io/docs/stocks/getting-started
+    Note: Polygon.io rebranded as Massive.com on Oct 30, 2025.
+    The new API endpoint is api.massive.com, but api.polygon.io still works.
+    
+    Documentation: https://massive.com/docs/stocks/getting-started
     """
     
-    BASE_URL = "https://api.polygon.io"
+    BASE_URL = "https://api.massive.com"  # New endpoint (api.polygon.io still works)
     
     def __init__(
         self,
@@ -67,10 +74,10 @@ class PolygonClient:
         retry_delay: float = 5.0
     ):
         """
-        Initialize Polygon.io client.
+        Initialize Massive.com (formerly Polygon.io) client.
         
         Args:
-            api_key: Your Polygon.io API key
+            api_key: Your Massive.com/Polygon.io API key (existing keys still work)
             rate_limiter: Optional rate limiter (default: 5 calls/min)
             max_retries: Maximum number of retry attempts
             retry_delay: Base delay for exponential backoff (seconds)
@@ -87,7 +94,7 @@ class PolygonClient:
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Make a request to Polygon.io API with rate limiting and retries.
+        Make a request to Massive.com API with rate limiting and retries.
         
         Args:
             endpoint: API endpoint (e.g., '/v2/aggs/ticker/AAPL/range/1/day/2023-01-01/2023-12-31')
@@ -151,7 +158,7 @@ class PolygonClient:
                 # Check for API-level errors
                 if data.get('status') == 'ERROR':
                     error_msg = data.get('error', 'Unknown error')
-                    raise requests.exceptions.RequestException(f"Polygon API error: {error_msg}")
+                    raise requests.exceptions.RequestException(f"Massive.com API error: {error_msg}")
                 
                 return data
                 

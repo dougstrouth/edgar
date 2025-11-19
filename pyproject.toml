@@ -28,3 +28,36 @@ dependencies = [
     "typing>=3.10.0.0",
     "yfinance>=0.2.55",
 ]
+
+[tool.pytest.ini_options]
+# Pytest configuration
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",                    # Verbose output
+    "--strict-markers",      # Strict marker checking
+    "--tb=short",           # Shorter traceback format
+    "--disable-warnings",   # Disable warnings for cleaner output
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+# Don't search for tests in these directories
+norecursedirs = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.egg-info",
+    "build",
+    "dist",
+    "logs",
+    "data_gathering/logs",
+    "data_processing/logs",
+    "scripts/logs",
+    "utils/logs",
+]

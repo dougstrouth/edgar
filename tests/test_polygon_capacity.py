@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Polygon.io Capacity and Connectivity Test
+Massive.com (formerly Polygon.io) Capacity and Connectivity Test
 
-Tests the Polygon.io API to verify:
-1. API key is valid
-2. Rate limiting is working correctly  
-3. Data can be fetched successfully
-4. Estimate gathering capacity
+Tests the Massive.com API to verify:
+1. API key is valid and working
+2. Can fetch historical stock data
+3. Rate limiting is working properly
+4. Data quality looks reasonable
+
+Note: Polygon.io rebranded as Massive.com on Oct 30, 2025.
+Existing API keys continue to work with the new api.massive.com endpoint.
 
 Usage:
-    # First, add your API key to .env:
-    # POLYGON_API_KEY=your_key_here
-    
     python test_polygon_capacity.py
 """
 
@@ -27,7 +27,7 @@ from utils.polygon_client import PolygonClient, PolygonRateLimiter
 from utils.database_conn import ManagedDatabaseConnection
 
 print("=" * 80)
-print("Polygon.io API Capacity Test")
+print("Massive.com (formerly Polygon.io) API Capacity Test")
 print("=" * 80)
 print()
 
@@ -44,7 +44,7 @@ if not api_key or api_key == "your_polygon_api_key_here":
     print("❌ POLYGON_API_KEY not set in .env file")
     print()
     print("To fix:")
-    print("  1. Sign up for free at: https://polygon.io/")
+    print("  1. Sign up for free at: https://massive.com/ (formerly polygon.io)")
     print("  2. Get your API key from the dashboard")
     print("  3. Add to .env: POLYGON_API_KEY=your_key_here")
     print()
@@ -62,7 +62,7 @@ print("-" * 40)
 if client.check_connectivity():
     print("✅ API is accessible and key is valid")
 else:
-    print("❌ Cannot connect to Polygon API")
+    print("❌ Cannot connect to Massive.com API")
     print("   Check your internet connection and API key")
     sys.exit(1)
 print()
@@ -157,7 +157,7 @@ if successes > 0:
     
     print()
     print("=" * 80)
-    print("✅ Polygon.io is working!")
+    print("✅ Massive.com is working!")
     print("=" * 80)
     print()
     print("Recommended next steps:")
@@ -176,6 +176,6 @@ else:
     print()
     print("Possible issues:")
     print("  - Invalid API key")
-    print("  - Network connectivity problems")
-    print("  - Polygon.io service outage")
+    print("  - Massive.com service outage")
+    print("  - Network connectivity issues")
     print("  - Rate limit already hit")

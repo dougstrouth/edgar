@@ -1,51 +1,59 @@
 # -*- coding: utf-8 -*-
 """
-Stock Data Gatherer Script (Refactored for Utilities)
+Stock Data Gatherer Script
 
-Connects to EDGAR DuckDB using centralized database_conn utility.
-Identifies CIKs and date ranges, maps CIKs to potentially MULTIPLE tickers
-using sec-cik-mapper, fetches historical stock data for ALL found tickers
-using yfinance, loads into DuckDB, and logs errors.
-Supports modes, batch loading, and error logging.
+Fetches historical stock data using yfinance and writes results to Parquet
+directories (not directly into DuckDB). Designed for resilience and data
+preservation: successful fetches are immediately written to a recovery
+Parquet file before batch writing.
 
-Uses:
-- config_utils.AppConfig for loading configuration from .env.
-- logging_utils.setup_logging for standardized logging.
-- database_conn.ManagedDatabaseConnection for DB connection management.
+Supports:
+    - Modes: initial_load | append | full_refresh
+    - Prioritization via `prioritize_tickers_hybrid`
+    - Optional external plan table (`stock_fetch_plan`) to drive fetch ranges
+    - Adaptive rate limiting & retry logic
+
+Environment Vars (optional):
+    YFINANCE_DISABLED=1    -> disables execution
+    YFINANCE_MAX_RETRIES    number of retries (default 5)
+    YFINANCE_BASE_DELAY     base backoff seconds (default 15.0)
+    YFINANCE_DAILY_LIMIT    daily ticker budget (default 100)
+    YFINANCE_UNTRACKABLE_EXPIRY_DAYS  age before retrying untrackable
 """
 
-import logging # Keep for level constants
+import logging
 import os
 import sys
 import time
-            item = q.get(timeout=FLUSH_TIMEOUT)
+import shutil
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, date, timezone, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-            if item is None: # Sentinel value to signal termination
-                _flush_batch(history_batch, 'stock_history')
-                _flush_batch(errors_batch, 'stock_fetch_errors')
-                logger.info("Writer process received sentinel. Shutting down.")
-                break
+import duckdb
+import pandas as pd
+import requests
+import yfinance as yf  # type: ignore
+from tqdm import tqdm
 
-            data_type, data = item
-            try:
-                if data_type == 'stock_history' and not data.empty:
-                    history_batch.append(data)
-                    if len(history_batch) >= BATCH_SIZE:
-                        _flush_batch(history_batch, 'stock_history')
-                elif data_type == 'stock_fetch_errors' and data:
-                    errors_batch.append(data)
-                    if len(errors_batch) >= BATCH_SIZE:
-                        _flush_batch(errors_batch, 'stock_fetch_errors')
-            except Exception as e:
-                logger.error(f"Writer process failed to handle data of type {data_type}: {e}", exc_info=True)
-        except Exception as e:
-            ename = type(e).__name__
-            if 'Empty' in ename or 'empty' in ename:
-                logger.debug("Writer queue timeout reached, flushing any pending batches...")
-                _flush_batch(history_batch, 'stock_history')
-                _flush_batch(errors_batch, 'stock_fetch_errors')
-                continue
-            logger.error(f"Writer process encountered an unexpected error: {e}", exc_info=True)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+sys.path.append(str(PROJECT_ROOT / 'utils'))
+sys.path.append(str(PROJECT_ROOT / 'data_processing'))
+
+from utils.config_utils import AppConfig
+from utils.logging_utils import setup_logging
+from utils.database_conn import ManagedDatabaseConnection
+from utils.adaptive_rate_limiter import AdaptiveRateLimiter
+from utils.prioritizer import prioritize_tickers_hybrid
+from data_processing import parquet_converter
+
+# --- Logger Setup ---
+SCRIPT_NAME = Path(__file__).stem
+LOG_DIRECTORY = Path(__file__).resolve().parent / "logs"
+logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # --- Constants ---
 DEFAULT_REQUEST_DELAY = 0.05 # Default 50ms delay
@@ -54,12 +62,23 @@ DEFAULT_MAX_WORKERS = 4 # Reduced default to be more respectful of API rate limi
 # --- Database Functions (Updated to use logger instance) ---
 def get_tickers_to_process(
     con: duckdb.DuckDBPyConnection,
-    target_tickers: Optional[List[str]] = None
+    target_tickers: Optional[List[str]] = None,
+    plan_table: Optional[str] = None
 ) -> List[str]:
-    """Gets a list of unique tickers to process from the 'tickers' table."""
+    """Gets list of tickers either from generic tickers table or a plan table."""
+    if plan_table:
+        logger.info(f"Loading tickers from plan table '{plan_table}'...")
+        try:
+            tickers_df = con.execute(f"SELECT DISTINCT ticker FROM {plan_table} ORDER BY rank").df()
+            out = tickers_df['ticker'].dropna().tolist()
+            logger.info(f"Loaded {len(out)} tickers from plan table.")
+            return out
+        except Exception as e:
+            logger.error(f"Failed reading plan table {plan_table}: {e}", exc_info=True)
+            return []
     logger.info("Querying for unique tickers to process...")
     query = "SELECT DISTINCT ticker FROM tickers"
-    params = []
+    params: List[str] = []
     if target_tickers:
         query += f" WHERE ticker IN ({','.join(['?'] * len(target_tickers))})"
         params.extend(target_tickers)
@@ -322,8 +341,8 @@ def writer_process(q: Any, parquet_dir: Path):
     This version batches data before writing to improve performance.
     """
     parquet_converter.logger = logger # Share logger
-    history_batch = []
-    errors_batch = []
+    history_batch: List[pd.DataFrame] = []
+    errors_batch: List[Dict[str, Any]] = []
     BATCH_SIZE = 1000 # Number of items to accumulate before writing
     FLUSH_TIMEOUT = 5.0 # seconds
 
@@ -381,11 +400,12 @@ ERROR_TABLE_NAME = "stock_fetch_errors"
 
 # --- Main Pipeline Function (Refactored to use logger) ---
 def run_stock_data_pipeline(
-    config: AppConfig,      # Pass config
-    mode: str = 'append',   # Changed default to 'append'
+    config: AppConfig,
+    mode: str = 'append',
     append_start_date: Optional[str] = None,
     target_tickers: Optional[List[str]] = None,
-    db_path_override: Optional[str] = None
+    db_path_override: Optional[str] = None,
+    plan_table: Optional[str] = None
 ):
     """Fetches stock data and saves it to Parquet files."""
     start_run_time = time.time()
@@ -436,32 +456,68 @@ def run_stock_data_pipeline(
                 logger.warning("Drop tables mode is not applicable for Parquet generation. Exiting.")
                 return
 
-            tickers_to_process = get_tickers_to_process(conn, target_tickers)
+            tickers_to_process = get_tickers_to_process(conn, target_tickers, plan_table=plan_table)
             if not tickers_to_process:
                 logger.warning("No tickers found in the database to process.")
                 return
 
-            # Get the set of tickers to exclude
-            untrackable_expiry_days = config.get_optional_int("YFINANCE_UNTRACKABLE_EXPIRY_DAYS", 365)
-            untrackable_tickers = get_untrackable_tickers(conn, expiry_days=untrackable_expiry_days)
+            # If a plan table is provided, build jobs directly from it and skip range logic
+            if plan_table:
+                try:
+                    plan_rows = conn.execute(f"SELECT ticker, start_date, end_date FROM {plan_table} ORDER BY rank").fetchall()
+                except Exception as e:
+                    logger.error(f"Failed to read fetch plan table {plan_table}: {e}", exc_info=True)
+                    return
+                for ticker, start_dt, end_dt in plan_rows:
+                    # Normalize dates
+                    try:
+                        if isinstance(start_dt, str): start_dt_obj = datetime.fromisoformat(start_dt).date()
+                        elif isinstance(start_dt, datetime): start_dt_obj = start_dt.date()
+                        elif isinstance(start_dt, date): start_dt_obj = start_dt
+                        else: start_dt_obj = date(1990,1,1)
+                        if isinstance(end_dt, str): end_dt_obj = datetime.fromisoformat(end_dt).date()
+                        elif isinstance(end_dt, datetime): end_dt_obj = end_dt.date()
+                        elif isinstance(end_dt, date): end_dt_obj = end_dt
+                        else: end_dt_obj = datetime.now(timezone.utc).date()
+                    except Exception:
+                        start_dt_obj = date(1990,1,1)
+                        end_dt_obj = datetime.now(timezone.utc).date()
+                    if start_dt_obj > end_dt_obj:
+                        logger.debug(f"Skipping {ticker} (plan start after end)")
+                        continue
+                    jobs_to_run.append({
+                        'ticker': ticker,
+                        'cik': None,
+                        'start_date': start_dt_obj.strftime('%Y-%m-%d'),
+                        'end_date': end_dt_obj.strftime('%Y-%m-%d'),
+                        'db_path': db_log_path
+                    })
+                total_tickers_to_process = len(jobs_to_run)
+                logger.info(f"Built {total_tickers_to_process} jobs from plan table '{plan_table}'. Skipping default range logic.")
+                # Skip to daily budget trimming
+                latest_dates: Dict[str, date] = {}
+            else:
+                # Get the set of tickers to exclude
+                untrackable_expiry_days = config.get_optional_int("YFINANCE_UNTRACKABLE_EXPIRY_DAYS", 365) or 365
+                untrackable_tickers = get_untrackable_tickers(conn, expiry_days=untrackable_expiry_days)
 
-            latest_dates = {}
-            if mode == 'append':
-                # This still reads from the DB to see what's already been loaded
-                latest_dates = get_latest_stock_dates(conn, target_tickers=tickers_to_process)
+                latest_dates = {}
+                if mode == 'append':
+                    # This still reads from the DB to see what's already been loaded
+                    latest_dates = get_latest_stock_dates(conn, target_tickers=tickers_to_process)
 
-            # Filter out untrackable tickers
-            initial_count = len(tickers_to_process)
-            tickers_to_process = [t for t in tickers_to_process if t not in untrackable_tickers]
-            skipped_untrackable = initial_count - len(tickers_to_process)
-            # Apply hybrid prioritization (Option C) to order tickers conservatively
-            try:
-                prioritized = prioritize_tickers_hybrid(db_log_path, tickers_to_process)
-                # prioritized is list of (ticker, score)
-                tickers_to_process = [t for t, _ in prioritized]
-                logger.info("Applied hybrid prioritization (option C) to tickers.")
-            except Exception as e:
-                logger.warning(f"Prioritization failed, proceeding with original ordering: {e}")
+                # Filter out untrackable tickers
+                initial_count = len(tickers_to_process)
+                tickers_to_process = [t for t in tickers_to_process if t not in untrackable_tickers]
+                skipped_untrackable = initial_count - len(tickers_to_process)
+                # Apply hybrid prioritization (Option C) to order tickers conservatively
+                try:
+                    prioritized = prioritize_tickers_hybrid(db_log_path, tickers_to_process)
+                    # prioritized is list of (ticker, score)
+                    tickers_to_process = [t for t, _ in prioritized]
+                    logger.info("Applied hybrid prioritization (option C) to tickers.")
+                except Exception as e:
+                    logger.warning(f"Prioritization failed, proceeding with original ordering: {e}")
             total_tickers_to_process = len(tickers_to_process) # Update count
 
             logger.info(f"Preparing {total_tickers_to_process} fetch jobs (skipped {skipped_untrackable} untrackable tickers)...")
@@ -627,6 +683,12 @@ if __name__ == "__main__":
         choices=['initial_load', 'append', 'full_refresh'],
         help="The run mode for the data gathering pipeline."
     )
+    parser.add_argument(
+        "--target-tickers-table",
+        type=str,
+        default=None,
+        help="Optional table containing tickers and (start_date,end_date) for planned fetches (e.g., stock_fetch_plan)."
+    )
     args = parser.parse_args()
 
     try:
@@ -641,7 +703,8 @@ if __name__ == "__main__":
     run_stock_data_pipeline(
         config=config,
         mode=args.mode,
-        db_path_override=None # Use DB from config by default
+        db_path_override=None,
+        plan_table=getattr(args, 'target_tickers_table', None)
     )
 
     logger.info("Script execution finished.")

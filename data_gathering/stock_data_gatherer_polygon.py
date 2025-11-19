@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Polygon.io Stock Data Gatherer
+Massive.com (formerly Polygon.io) Stock Data Gatherer
 
-Fetches historical stock price data from Polygon.io and stores it in Parquet format.
-Uses the same architecture as stock_data_gatherer.py but with Polygon.io's API.
+Fetches historical stock price data from Massive.com and stores it in Parquet format.
+Uses the same architecture as stock_data_gatherer.py but with Massive.com's API.
 
-Polygon.io free tier:
+Note: Polygon.io rebranded as Massive.com on Oct 30, 2025. Existing API keys
+continue to work. The API now uses api.massive.com (api.polygon.io still supported).
+
+Free tier limits:
 - 5 API calls per minute (no daily limit)
 - Previous day's data (1-day delay)
 - Unlimited historical data access
@@ -264,7 +267,8 @@ def run_polygon_pipeline(
     mode: str = 'append',
     target_tickers: Optional[List[str]] = None,
     limit: Optional[int] = None,
-    lookback_years: int = LOOKBACK_YEARS
+    lookback_years: int = LOOKBACK_YEARS,
+    plan_table: Optional[str] = None
 ):
     """
     Main pipeline for fetching stock data from Polygon.io.
@@ -303,8 +307,21 @@ def run_polygon_pipeline(
             logger.critical("Failed to connect to database")
             return
         
-        # Get tickers to process
-        tickers = get_tickers_to_process(con, target_tickers, limit)
+        # If a plan table is provided, load tickers (and defer job creation later)
+        if plan_table:
+            logger.info(f"Using plan table '{plan_table}' for ticker sourcing.")
+            try:
+                tickers_df = con.execute(f"SELECT DISTINCT ticker FROM {plan_table} ORDER BY rank").df()
+                tickers = tickers_df['ticker'].dropna().tolist()
+                if limit:
+                    tickers = tickers[:limit]
+                logger.info(f"Loaded {len(tickers)} tickers from plan table.")
+            except Exception as e:
+                logger.critical(f"Failed reading plan table {plan_table}: {e}")
+                return
+        else:
+            # Get tickers to process normally
+            tickers = get_tickers_to_process(con, target_tickers, limit)
         
         if not tickers:
             logger.warning("No tickers found to process")
@@ -312,26 +329,25 @@ def run_polygon_pipeline(
         
         logger.info(f"Processing up to {limit if limit else 'all'} tickers")
         
-        # Prioritize tickers based on XBRL richness and stock data needs
-        try:
-            logger.info("Prioritizing tickers using XBRL-aware strategy...")
-            prioritized = prioritize_tickers_for_stock_data(
-                db_path=config.DB_FILE_STR,
-                tickers=tickers,
-                lookback_days=365
-            )
-            # Apply limit AFTER prioritization to get the most important tickers
-            if limit:
-                prioritized = prioritized[:limit]
-            tickers = [ticker for ticker, score in prioritized]
-            logger.info(f"Tickers prioritized. Top {min(10, len(prioritized))}:")
-            for i, (ticker, score) in enumerate(prioritized[:10], 1):
-                logger.info(f"  {i:2}. {ticker:8} (score: {score:.4f})")
-        except Exception as e:
-            logger.warning(f"Prioritization failed: {e}. Using unprioritized list.")
-            # Apply limit even if prioritization failed
-            if limit:
-                tickers = tickers[:limit]
+        # Prioritize only if not using plan table
+        if not plan_table:
+            try:
+                logger.info("Prioritizing tickers using XBRL-aware strategy...")
+                prioritized = prioritize_tickers_for_stock_data(
+                    db_path=config.DB_FILE_STR,
+                    tickers=tickers,
+                    lookback_days=365
+                )
+                if limit:
+                    prioritized = prioritized[:limit]
+                tickers = [ticker for ticker, score in prioritized]
+                logger.info(f"Tickers prioritized. Top {min(10, len(prioritized))}:")
+                for i, (ticker, score) in enumerate(prioritized[:10], 1):
+                    logger.info(f"  {i:2}. {ticker:8} (score: {score:.4f})")
+            except Exception as e:
+                logger.warning(f"Prioritization failed: {e}. Using unprioritized list.")
+                if limit:
+                    tickers = tickers[:limit]
         
         # Determine date ranges
         if mode == 'initial_load' or mode == 'full_refresh':
@@ -345,50 +361,79 @@ def run_polygon_pipeline(
             end_date = date.today() - timedelta(days=1)
             start_date = end_date - timedelta(days=365 * lookback_years)
     
-    # Create jobs for workers, split into missing intervals where appropriate
-    jobs = []
-    skipped_fully_up_to_date = 0
-    total_intervals_created = 0
-    with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con_check:
-        if not con_check:
-            logger.warning("Could not open DB to check existing dates; creating full-range jobs for all tickers")
-            for ticker in tickers:
+    # Create jobs
+    jobs: List[Dict[str, Any]] = []
+    if plan_table:
+        logger.info(f"Building jobs directly from plan table '{plan_table}' (skipping interval gap analysis).")
+        with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con_plan:
+            if not con_plan:
+                logger.critical("Database connection failed when reading plan table for job creation.")
+                return
+            try:
+                rows = con_plan.execute(f"SELECT ticker, start_date, end_date FROM {plan_table} ORDER BY rank").fetchall()
+            except Exception as e:
+                logger.critical(f"Failed to read plan rows: {e}")
+                return
+            for ticker, sdt, edt in rows:
+                # Normalize types to date
+                def to_date(val):
+                    if val is None: return None
+                    if isinstance(val, date): return val
+                    if isinstance(val, datetime): return val.date()
+                    try:
+                        return datetime.fromisoformat(str(val)).date()
+                    except Exception:
+                        return None
+                start_d = to_date(sdt) or (date.today() - timedelta(days=365*lookback_years))
+                end_d = to_date(edt) or (date.today() - timedelta(days=1))
+                if start_d > end_d:
+                    logger.debug(f"Skipping {ticker} (plan start > end)")
+                    continue
                 jobs.append({
                     'ticker': ticker,
-                    'start_date': start_date,
-                    'end_date': end_date,
+                    'start_date': start_d,
+                    'end_date': end_d,
                     'api_key': api_key
                 })
-            total_intervals_created = len(jobs)
-        else:
-            for ticker in tickers:
-                # Determine candidate start for the ticker
-                if mode == 'append' and ticker in latest_dates:
-                    candidate_start = latest_dates[ticker] + timedelta(days=1)
-                    if candidate_start > end_date:
-                        logger.debug(f"{ticker}: Already up to date")
-                        skipped_fully_up_to_date += 1
-                        continue
-                else:
-                    candidate_start = start_date
-
-                # Compute missing intervals within [candidate_start, end_date]
-                intervals = get_missing_intervals(con_check, ticker, candidate_start, end_date)
-                if not intervals:
-                    logger.debug(f"{ticker}: No missing intervals found; skipping")
-                    skipped_fully_up_to_date += 1
-                    continue
-
-                for interval in intervals:
+        logger.info(f"Created {len(jobs)} jobs from plan table.")
+    else:
+        skipped_fully_up_to_date = 0
+        total_intervals_created = 0
+        with ManagedDatabaseConnection(db_path_override=config.DB_FILE_STR, read_only=True) as con_check:
+            if not con_check:
+                logger.warning("Could not open DB to check existing dates; creating full-range jobs for all tickers")
+                for ticker in tickers:
                     jobs.append({
                         'ticker': ticker,
-                        'start_date': interval['start'],
-                        'end_date': interval['end'],
+                        'start_date': start_date,
+                        'end_date': end_date,
                         'api_key': api_key
                     })
-                    total_intervals_created += 1
-
-    logger.info(f"Created {total_intervals_created} fetch intervals across {len(tickers)} tickers (skipped {skipped_fully_up_to_date} fully up-to-date tickers)")
+                total_intervals_created = len(jobs)
+            else:
+                for ticker in tickers:
+                    if mode == 'append' and ticker in latest_dates:
+                        candidate_start = latest_dates[ticker] + timedelta(days=1)
+                        if candidate_start > end_date:
+                            logger.debug(f"{ticker}: Already up to date")
+                            skipped_fully_up_to_date += 1
+                            continue
+                    else:
+                        candidate_start = start_date
+                    intervals = get_missing_intervals(con_check, ticker, candidate_start, end_date)
+                    if not intervals:
+                        logger.debug(f"{ticker}: No missing intervals found; skipping")
+                        skipped_fully_up_to_date += 1
+                        continue
+                    for interval in intervals:
+                        jobs.append({
+                            'ticker': ticker,
+                            'start_date': interval['start'],
+                            'end_date': interval['end'],
+                            'api_key': api_key
+                        })
+                        total_intervals_created += 1
+        logger.info(f"Created {total_intervals_created} fetch intervals across {len(tickers)} tickers (skipped {skipped_fully_up_to_date} fully up-to-date tickers)")
     
     logger.info(f"Created {len(jobs)} fetch jobs")
     
@@ -468,6 +513,12 @@ if __name__ == "__main__":
         default=LOOKBACK_YEARS,
         help=f"Years of historical data to fetch (default: {LOOKBACK_YEARS})"
     )
+    parser.add_argument(
+        "--target-tickers-table",
+        type=str,
+        default=None,
+        help="Optional plan table containing ticker,start_date,end_date columns (e.g. stock_fetch_plan)."
+    )
     
     args = parser.parse_args()
     
@@ -481,5 +532,6 @@ if __name__ == "__main__":
         config=config,
         mode=args.mode,
         limit=args.limit,
-        lookback_years=args.lookback_years
+        lookback_years=args.lookback_years,
+        plan_table=args.target_tickers_table
     )

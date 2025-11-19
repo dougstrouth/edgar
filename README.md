@@ -57,7 +57,7 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
     *   `DB_FILE`: The absolute path for the DuckDB database file (e.g., `C:\path\to\data\edgar_analytics.duckdb`).
     *   `SEC_USER_AGENT`: A descriptive User-Agent for making requests to the SEC (e.g., `YourName YourOrg your.email@example.com`). **This is required by the SEC.**
     *   `FRED_API_KEY`: Your API key for the FRED service (optional, if using `gather-macro`).
-    *   `POLYGON_API_KEY`: Your API key from Polygon.io (free tier works). Required for Polygon stock data.
+    *   `POLYGON_API_KEY`: Your API key from Massive.com (formerly Polygon.io) - free tier works.
     *   `POLYGON_MAX_WORKERS` (optional): Parallel workers for the Polygon gatherer (default: 2; free tier is 5 req/min, so keep small).
 
 ## Project Structure
@@ -65,7 +65,7 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
 The project is organized into the following directories:
 
 *   `main.py`: The main orchestrator for running pipeline steps.
-*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Polygon.io, Yahoo Finance, FRED).
+*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Massive.com, Yahoo Finance, FRED).
 *   `data_processing/`: Scripts for parsing, cleaning, and loading data into the database.
 *   `analysis/`: Scripts and notebooks for analyzing the data.
 *   `utils/`: Utility scripts for configuration, logging, and database connections.
@@ -117,8 +117,9 @@ python main.py load_macro
 python main.py gather_market_risk
 python main.py load_market_risk
 
-# Gather daily OHLCV from Polygon.io (recommended for prices)
-# Option A: direct script
+# Step 3: Gather supplementary stock data
+# Gather daily OHLCV from Massive.com (formerly Polygon.io) - recommended for prices
+# Start small to test (limit=50 means 50 tickers)
 python data_gathering/stock_data_gatherer_polygon.py --mode initial_load --limit 50
 
 # Option B: orchestrator alias
@@ -144,12 +145,12 @@ python main.py cleanup --all
 
 For a detailed description of all database tables, columns, and their relationships, please see the [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
 
-## Polygon.io Quick Check
+## Massive.com Quick Check
 
 Validate connectivity and estimate capacity:
 
 ```bash
-python test_polygon_capacity.py
+python tests/test_polygon_capacity.py
 ```
 This checks your `POLYGON_API_KEY`, fetches sample tickers, and estimates effective calls/min under rate limits.
 
