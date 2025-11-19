@@ -128,21 +128,21 @@ class PolygonClient:
                 
                 # Check for rate limit (429) or server errors (5xx)
                 if response.status_code == 429:
-                    # Honor Retry-After header if present
+                    # Honor Retry-After header if present, otherwise use aggressive backoff
                     ra = response.headers.get('Retry-After')
                     try:
-                        wait_time = float(ra) if ra is not None else (self.retry_delay * (2 ** attempt))
+                        wait_time = float(ra) if ra is not None else (self.retry_delay * (3 ** attempt))
                     except Exception:
-                        wait_time = self.retry_delay * (2 ** attempt)
+                        wait_time = self.retry_delay * (3 ** attempt)
 
                     # Add jitter to avoid thundering herd
                     jitter = min(5.0, wait_time * 0.2)
                     sleep_time = wait_time + (jitter * (0.5 - time.time() % 1))
                     logger.warning(f"Rate limit hit (429). Waiting {sleep_time:.1f}s before retry {attempt + 1}/{self.max_retries}")
                     time.sleep(sleep_time)
-                    # After a 429, increase internal spacing conservatively
+                    # After a 429, significantly increase internal spacing to prevent future limits
                     try:
-                        self.rate_limiter.min_interval = max(self.rate_limiter.min_interval, sleep_time)
+                        self.rate_limiter.min_interval = max(self.rate_limiter.min_interval, 15.0)
                     except Exception:
                         pass
                     continue
@@ -236,8 +236,10 @@ class PolygonClient:
             return results
             
         except requests.exceptions.RequestException as e:
+            # Re-raise exception instead of returning None
+            # This ensures fetch_worker properly counts it as an error
             logger.error(f"Failed to fetch aggregates for {ticker}: {e}")
-            return None
+            raise
     
     def get_ticker_details(self, ticker: str) -> Optional[Dict[str, Any]]:
         """

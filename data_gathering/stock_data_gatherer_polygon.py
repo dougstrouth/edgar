@@ -58,6 +58,19 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
 BATCH_SIZE = 100  # Number of records before writing to parquet
 LOOKBACK_YEARS = 5  # Default historical data period
+DEFAULT_MAX_RUNTIME_HOURS = 15  # Default max runtime (increased for rate limiting)
+
+# Helper for clamping overly large historical intervals when using a plan table
+def _clamp_date_range(start_d: date, end_d: date, clamp_days: int) -> date:
+    """Return a potentially adjusted start date ensuring we only fetch at most clamp_days.
+
+    Keeps the end date unchanged. If the original span is already <= clamp_days, returns original start.
+    """
+    span_days = (end_d - start_d).days
+    if span_days <= clamp_days:
+        return start_d
+    # Shift start forward so span == clamp_days
+    return end_d - timedelta(days=clamp_days)
 
 
 def get_tickers_to_process(
@@ -274,19 +287,20 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     api_key = job['api_key']
     
     # Create client in this process (can't share across processes)
-    # Use slower rate limit in workers to be safe
-    rate_limiter = PolygonRateLimiter(calls_per_minute=4)  # Slightly under 5 for safety
-    client = PolygonClient(api_key, rate_limiter=rate_limiter)
+    # Use conservative rate limit in workers to avoid 429s
+    rate_limiter = PolygonRateLimiter(calls_per_minute=3)  # Conservative: 3/min to handle bursts
+    client = PolygonClient(api_key, rate_limiter=rate_limiter, max_retries=3, retry_delay=10.0)
     
     try:
         # Fetch aggregates
         results = client.get_aggregates(ticker, start_date, end_date, timespan='day')
         
         if not results:
+            # No data found (legitimate empty response, not an error)
             return {
                 'status': 'empty',
                 'ticker': ticker,
-                'error': 'No data returned from Polygon'
+                'message': 'No data available for date range'
             }
         
         # Convert to DataFrame
@@ -471,7 +485,13 @@ def run_polygon_pipeline(
                 logger.critical(f"Expected columns: ticker, start_date, end_date, rank")
                 logger.critical(f"Hint: Regenerate the backlog with 'python main.py generate_backlog'")
                 return
-            
+
+            # Determine clamp window (may override lookback_years if env var provided)
+            clamp_years_env = config.get_optional_int("POLYGON_CLAMP_LOOKBACK_YEARS")
+            effective_years = clamp_years_env if clamp_years_env is not None else lookback_years
+            clamp_days = effective_years * 365
+            clamped_intervals = 0
+
             for ticker, sdt, edt in rows:
                 # Normalize types to date
                 def to_date(val):
@@ -493,14 +513,22 @@ def run_polygon_pipeline(
                 if start_d > end_d:
                     logger.debug(f"Skipping {ticker} (start > end)")
                     continue
-                
+                # Clamp overly large ranges to reduce API pressure
+                adjusted_start = _clamp_date_range(start_d, end_d, clamp_days)
+                if adjusted_start != start_d:
+                    clamped_intervals += 1
+                    logger.debug(f"Clamped {ticker} range {start_d}→{end_d} to {adjusted_start}→{end_d} ({clamp_days}d window)")
+
                 jobs.append({
                     'ticker': ticker,
-                    'start_date': start_d,
+                    'start_date': adjusted_start,
                     'end_date': end_d,
                     'api_key': api_key
                 })
         logger.info(f"Created {len(jobs)} jobs from plan table.")
+        if clamped_intervals:
+            pct = (clamped_intervals / len(jobs)) * 100 if jobs else 0
+            logger.info(f"🔧 Clamped {clamped_intervals} intervals ({pct:.1f}% of jobs) to at most {clamp_days} days (≈{effective_years}y)")
     else:
         # No plan table - do intelligent gap analysis per ticker
         skipped_fully_up_to_date = 0
@@ -549,16 +577,23 @@ def run_polygon_pipeline(
     
     # Start timer
     pipeline_start_time = time.time()
-    max_runtime_seconds = 9 * 60 * 60  # 9 hours
+    max_runtime_hours_config = config.get_optional_float("POLYGON_MAX_RUNTIME_HOURS", DEFAULT_MAX_RUNTIME_HOURS)
+    max_runtime_hours = max_runtime_hours_config if max_runtime_hours_config is not None else DEFAULT_MAX_RUNTIME_HOURS
+    max_runtime_seconds = int(max_runtime_hours * 60 * 60)
     
-    logger.info(f"⏰ Pipeline will run for maximum {max_runtime_seconds / 3600:.1f} hours")
+    logger.info(f"⏰ Pipeline will run for maximum {max_runtime_hours:.1f} hours")
     logger.info(f"📊 Total jobs to process: {len(jobs)}")
+    # Calculate realistic throughput estimate
+    calls_per_hour = 3 * 60  # 3 calls/min conservative
+    estimated_hours = len(jobs) / calls_per_hour
+    logger.info(f"⏱️  Estimated time: {estimated_hours:.1f} hours at conservative rate (3 calls/min)")
     
     # Process jobs
     success_count = 0
     error_count = 0
     empty_count = 0
     jobs_processed = 0
+    failed_tickers: List[Dict[str, str]] = []  # Track failed tickers for retry
     
     # Collect data for batch writing
     data_batch = []
@@ -622,6 +657,14 @@ def run_polygon_pipeline(
                 empty_count += 1
             else:
                 error_count += 1
+                # Track failed ticker for potential retry
+                ticker_failed = result.get('ticker', 'unknown')
+                error_msg = result.get('error', 'Unknown error')
+                if isinstance(ticker_failed, str):
+                    failed_tickers.append({
+                        'ticker': ticker_failed,
+                        'error': str(error_msg)
+                    })
     
     # Write remaining data
     if data_batch:
@@ -643,6 +686,17 @@ def run_polygon_pipeline(
     total_runtime = time.time() - pipeline_start_time
     runtime_hours = total_runtime / 3600
     
+    # Save failed tickers to a file for potential retry
+    if failed_tickers:
+        failed_log = parquet_dir.parent / f"failed_tickers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(failed_log, 'w') as f:
+            f.write(f"# Failed tickers from run at {datetime.now()}\n")
+            f.write(f"# Total failures: {len(failed_tickers)}\n")
+            f.write("#\n")
+            for failure in failed_tickers:
+                f.write(f"{failure['ticker']}\t{failure['error']}\n")
+        logger.info(f"📝 Failed tickers written to: {failed_log}")
+    
     logger.info("=" * 80)
     logger.info("Pipeline Complete")
     logger.info(f"⏱️  Total Runtime: {runtime_hours:.2f} hours ({total_runtime:.0f} seconds)")
@@ -650,6 +704,8 @@ def run_polygon_pipeline(
     logger.info(f"✅ Success: {success_count}")
     logger.info(f"⚠️  Empty: {empty_count}")
     logger.info(f"❌ Errors: {error_count}")
+    if failed_tickers:
+        logger.warning(f"⚠️  {len(failed_tickers)} tickers failed and may need retry")
     logger.info(f"📁 Parquet files written to: {parquet_dir}")
     logger.info("=" * 80)
 

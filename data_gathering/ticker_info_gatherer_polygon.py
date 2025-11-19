@@ -27,7 +27,7 @@ import sys
 import logging
 import argparse
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -42,6 +42,7 @@ from utils.config_utils import AppConfig  # noqa: E402
 from utils.logging_utils import setup_logging  # noqa: E402
 from utils.database_conn import ManagedDatabaseConnection  # noqa: E402
 from utils.polygon_client import PolygonClient, PolygonRateLimiter  # noqa: E402
+from utils.prioritizer import prioritize_tickers_for_stock_data  # noqa: E402
 
 # Setup logging
 SCRIPT_NAME = Path(__file__).stem
@@ -51,6 +52,30 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 # Constants
 DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
 BATCH_SIZE = 100  # Number of records before writing to parquet
+DEFAULT_INFO_MAX_RUNTIME_HOURS = 4  # Safeguard to avoid runaway
+DEFAULT_REFRESH_DAYS = 30  # Re-fetch info if older than this (unless force-refresh)
+
+def filter_tickers_for_info(
+    all_tickers: List[str],
+    existing_info: Dict[str, datetime],
+    refresh_days: int,
+    force_refresh: bool,
+    current_time: Optional[datetime] = None,
+) -> List[str]:
+    """Determine which tickers to (re)fetch based on last info age.
+
+    Returns all_tickers if force_refresh, otherwise those missing OR older than refresh_days.
+    """
+    if force_refresh:
+        return all_tickers
+    now = current_time or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=refresh_days)
+    to_fetch: List[str] = []
+    for t in all_tickers:
+        ts = existing_info.get(t)
+        if ts is None or ts < cutoff:
+            to_fetch.append(t)
+    return to_fetch
 
 
 def get_tickers_to_fetch(
@@ -135,7 +160,7 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     
     # Create client in this process (can't share across processes)
     # Use slower rate limit in workers to be safe
-    rate_limiter = PolygonRateLimiter(calls_per_minute=4)  # Slightly under 5 for safety
+    rate_limiter = PolygonRateLimiter(calls_per_minute=3)  # Conservative pacing
     client = PolygonClient(api_key, rate_limiter=rate_limiter)
     
     try:
@@ -237,7 +262,9 @@ def run_polygon_ticker_info_pipeline(
     config: AppConfig,
     target_tickers: Optional[List[str]] = None,
     limit: Optional[int] = None,
-    force_refresh: bool = False
+    force_refresh: bool = False,
+    prioritize: bool = False,
+    prioritizer_lookback_days: int = 365,
 ):
     """
     Main pipeline for fetching ticker info from Polygon.io.
@@ -266,6 +293,13 @@ def run_polygon_ticker_info_pipeline(
     # Get max workers
     max_workers = config.get_optional_int("POLYGON_MAX_WORKERS", DEFAULT_MAX_WORKERS)
     logger.info(f"Using up to {max_workers} workers")
+
+    # Runtime & refresh windows from env
+    max_runtime_hours_env = config.get_optional_float("POLYGON_INFO_MAX_RUNTIME_HOURS", DEFAULT_INFO_MAX_RUNTIME_HOURS)
+    max_runtime_hours = max_runtime_hours_env if max_runtime_hours_env is not None else DEFAULT_INFO_MAX_RUNTIME_HOURS
+    refresh_days_env = config.get_optional_int("POLYGON_INFO_REFRESH_DAYS", DEFAULT_REFRESH_DAYS)
+    refresh_days = refresh_days_env if refresh_days_env is not None else DEFAULT_REFRESH_DAYS
+    logger.info(f"Max runtime: {max_runtime_hours:.1f} hours | Refresh window: {refresh_days} days")
     
     # Get database connection
     with ManagedDatabaseConnection(str(config.DB_FILE)) as con:
@@ -280,20 +314,41 @@ def run_polygon_ticker_info_pipeline(
             logger.warning("No tickers to process")
             return
         
-        # Filter out tickers we already have (unless force_refresh)
-        if not force_refresh:
-            existing_info = get_existing_ticker_info(con, all_tickers)
-            tickers_to_fetch = [t for t in all_tickers if t not in existing_info]
-            logger.info(f"Skipping {len(existing_info)} tickers with existing info")
-        else:
-            tickers_to_fetch = all_tickers
+        # Optional prioritization BEFORE refresh filtering (so stale tickers maintain ordering)
+        if prioritize:
+            try:
+                logger.info(f"Prioritizing {len(all_tickers)} tickers using stock data heuristic (lookback {prioritizer_lookback_days}d)...")
+                prioritized_pairs = prioritize_tickers_for_stock_data(
+                    db_path=config.DB_FILE_STR,
+                    tickers=all_tickers,
+                    lookback_days=prioritizer_lookback_days
+                )
+                all_tickers = [t for t, _score in prioritized_pairs]
+                logger.info("Top 10 prioritized tickers:")
+                for i, (t, score) in enumerate(prioritized_pairs[:10], 1):
+                    logger.info(f"  {i:2}. {t:10} score={score:.4f}")
+            except Exception as e:
+                logger.warning(f"Prioritization failed: {e}; proceeding unprioritized")
+
+        # Existing info and refresh logic (after potential prioritization)
+        existing_info = get_existing_ticker_info(con, all_tickers)
+        tickers_to_fetch = filter_tickers_for_info(all_tickers, existing_info, refresh_days, force_refresh)
+        skipped = len(all_tickers) - len(tickers_to_fetch)
+        if force_refresh:
             logger.info("Force refresh enabled - fetching all tickers")
+        else:
+            logger.info(f"Skipping {skipped} tickers with recent info (< {refresh_days}d)")
         
         if not tickers_to_fetch:
             logger.info("All tickers already have info. Use --force-refresh to re-fetch.")
             return
         
-        logger.info(f"Will fetch info for {len(tickers_to_fetch)} tickers")
+        # Apply limit AFTER prioritization & refresh filtering
+        if limit:
+            tickers_to_fetch = tickers_to_fetch[:limit]
+            logger.info(f"Applied limit: processing first {len(tickers_to_fetch)} prioritized tickers")
+
+        logger.info(f"Will fetch info for {len(tickers_to_fetch)} tickers (prioritize={prioritize})")
     
     # Create jobs
     jobs = [{'ticker': ticker, 'api_key': api_key} for ticker in tickers_to_fetch]
@@ -303,53 +358,71 @@ def run_polygon_ticker_info_pipeline(
     success_count = 0
     error_count = 0
     empty_count = 0
-    
+    failed_tickers: List[Dict[str, str]] = []
+    data_batch: List[Dict[str, Any]] = []  # accumulate ticker_info dicts
+
     logger.info(f"Processing {len(jobs)} tickers with {max_workers} workers...")
+    pipeline_start = datetime.now(timezone.utc)
+    max_runtime_seconds = int(max_runtime_hours * 3600)
     
+    def handle_result(result: Dict[str, Any]):
+        nonlocal success_count, error_count, empty_count
+        results.append(result)
+        if result['status'] == 'success':
+            success_count += 1
+            data_batch.append(result['data'])
+        elif result['status'] == 'error':
+            error_count += 1
+            failed_tickers.append({'ticker': result.get('ticker', 'unknown'), 'error': result.get('error', 'Unknown')})
+        else:
+            empty_count += 1
+
+        # Batch write condition
+        if len(data_batch) >= BATCH_SIZE:
+            write_batch(parquet_dir, data_batch)
+            data_batch.clear()
+
+        # Runtime check
+        elapsed = (datetime.now(timezone.utc) - pipeline_start).total_seconds()
+        if elapsed > max_runtime_seconds:
+            logger.warning(f"⏰ Reached max runtime {max_runtime_hours:.1f}h, stopping early.")
+            return False
+        return True
+
+    def write_batch(parquet_dir: Path, batch: List[Dict[str, Any]]):
+        if not batch:
+            return
+        df = pd.DataFrame(batch)
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        file = parquet_dir / f"ticker_info_batch_{ts}.parquet"
+        df.to_parquet(file, index=False, engine='pyarrow', compression='snappy')
+        logger.info(f"📦 Wrote batch of {len(df)} ticker info records to {file.name}")
+
     if max_workers == 1:
-        # Serial processing
         for job in jobs:
-            result = fetch_worker(job)
-            results.append(result)
-            
-            if result['status'] == 'success':
-                success_count += 1
-            elif result['status'] == 'error':
-                error_count += 1
-            else:
-                empty_count += 1
+            if not handle_result(fetch_worker(job)):
+                break
     else:
-        # Parallel processing
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(fetch_worker, job): job for job in jobs}
-            
             for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-                
-                if result['status'] == 'success':
-                    success_count += 1
-                elif result['status'] == 'error':
-                    error_count += 1
-                else:
-                    empty_count += 1
+                if not handle_result(future.result()):
+                    break
     
     # Write successful results to parquet
-    successful_results = [r for r in results if r['status'] == 'success']
-    
-    if successful_results:
-        logger.info(f"Writing {len(successful_results)} successful results to Parquet...")
-        
-        # Collect all ticker info data
-        ticker_data = [r['data'] for r in successful_results]
-        df = pd.DataFrame(ticker_data)
-        
-        # Write to parquet with timestamp in filename
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        output_file = parquet_dir / f"ticker_info_{timestamp}.parquet"
-        df.to_parquet(output_file, index=False, engine='pyarrow', compression='snappy')
-        
-        logger.info(f"Wrote {len(df)} records to {output_file}")
+    # Final write of remaining batch
+    if data_batch:
+        write_batch(parquet_dir, data_batch)
+        data_batch.clear()
+
+    # Failed tickers log
+    if failed_tickers:
+        log_file = parquet_dir / f"failed_ticker_info_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(log_file, 'w') as f:
+            f.write(f"# Failed ticker info fetches at {datetime.now(timezone.utc).isoformat()}\n")
+            for rec in failed_tickers:
+                f.write(f"{rec['ticker']}\t{rec['error']}\n")
+        logger.info(f"📝 Failed tickers written to {log_file}")
     
     # Summary
     logger.info("=" * 80)
@@ -359,6 +432,8 @@ def run_polygon_ticker_info_pipeline(
     logger.info(f"⚠️  Empty:   {empty_count}")
     logger.info(f"❌ Errors:  {error_count}")
     logger.info(f"📊 Total:   {len(results)}")
+    if failed_tickers:
+        logger.warning(f"⚠️  {len(failed_tickers)} failures logged for retry")
 
 
 def main():
@@ -382,6 +457,17 @@ def main():
         action='store_true',
         help='Fetch info even for tickers we already have'
     )
+    parser.add_argument(
+        '--prioritize',
+        action='store_true',
+        help='Apply stock data prioritization ordering before refresh filtering'
+    )
+    parser.add_argument(
+        '--prioritizer-lookback-days',
+        type=int,
+        default=365,
+        help='Lookback window (days) used by prioritizer heuristic (default: 365)'
+    )
     
     args = parser.parse_args()
     
@@ -393,7 +479,9 @@ def main():
         config=config,
         target_tickers=args.tickers,
         limit=args.limit,
-        force_refresh=args.force_refresh
+        force_refresh=args.force_refresh,
+        prioritize=args.prioritize,
+        prioritizer_lookback_days=args.prioritizer_lookback_days,
     )
 
 

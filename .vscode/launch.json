@@ -1,229 +1,34 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "MAIN: Run 'all' pipeline",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["all"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: fetch",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["fetch"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: parse-to-parquet",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["parse-to-parquet"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: load",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: gather-info",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["gather_info"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: load-info",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load_info"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: validate",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["validate"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: summarize",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["summarize"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "MAIN: inspect (report only)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["inspect"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "MAIN: inspect --apply (dry-run)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["inspect", "--apply"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "MAIN: inspect --apply (execute)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["inspect", "--apply", "--no-dry-run"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: gather_stocks (yfinance)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["gather_stocks"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: gather-stocks-polygon (initial 50)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": [
-                "gather-stocks-polygon", "--",
-                "--mode", "initial_load",
-                "--limit", "50"
-            ],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: gather_macro",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["gather_macro"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: load_macro (full refresh)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load_macro", "macro_economic_data", "--full-refresh"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: gather_market_risk",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["gather_market_risk"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: load_market_risk (full refresh)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load_market_risk", "market_risk_factors", "--full-refresh"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: feature_eng",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["feature_eng"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: cleanup (all + cache)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["cleanup", "--all", "--cache"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: investigate_orphans",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["investigate_orphans"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "STEP: load_stocks (stock_history)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["load_stocks"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        },
-        {
-            "name": "LOAD: stock_history parquet → DuckDB",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/data_processing/load_supplementary_data.py",
-            "args": ["stock_history"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "envFile": "${workspaceFolder}/.env"
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {"name": "Pipeline: all","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["all"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: fetch","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["fetch"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: parse-to-parquet","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["parse-to-parquet"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: load","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["load"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: summarize","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["summarize"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: validate","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["validate"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: feature_eng","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["feature_eng"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Util: inspect (report)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["inspect"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Util: inspect (apply dry-run)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["inspect","--apply"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Util: inspect (apply execute)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["inspect","--apply","--no-dry-run"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: cleanup (all+cache)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["cleanup","--all","--cache"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Step: investigate_orphans","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["investigate_orphans"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Backlog: generate","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_backlog"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Stocks (YF): gather","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather_stocks"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Stocks (Polygon): append clamp","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","append","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Stocks (Polygon): initial 50","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","initial_load","--limit","50"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info: refresh window","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info: force refresh","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--force-refresh"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info: prioritize top 200","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--prioritize","--limit","200"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Load: ticker info","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["load-ticker-info"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Macro: gather","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather_macro"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Macro: load (full refresh)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["load_macro","--full-refresh"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Market Risk: gather","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather_market_risk"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Market Risk: load (full refresh)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["load_market_risk","--full-refresh"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Load: stocks (stock_history)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["load_stocks"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Direct: load stock_history parquet","type": "python","request": "launch","program": "${workspaceFolder}/data_processing/load_supplementary_data.py","args": ["stock_history"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "YF: gather-info","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather_info"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "YF: load-info","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["load_info"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Pytest: current file","type": "python","request": "launch","module": "pytest","args": ["${file}"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"}
+  ]
 }
