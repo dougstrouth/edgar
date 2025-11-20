@@ -26,9 +26,10 @@ Uses:
 import sys
 import logging
 import argparse
+import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pandas as pd  # type: ignore
@@ -51,6 +52,7 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # Constants
 DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
+DEFAULT_CALLS_PER_MINUTE = 3  # Conservative default (max 5 for free tier)
 BATCH_SIZE = 100  # Number of records before writing to parquet
 DEFAULT_INFO_MAX_RUNTIME_HOURS = 4  # Safeguard to avoid runaway
 DEFAULT_REFRESH_DAYS = 30  # Re-fetch info if older than this (unless force-refresh)
@@ -150,28 +152,63 @@ def get_existing_ticker_info(
     return existing_info
 
 
-def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
+def get_polygon_untrackable_tickers(con: duckdb.DuckDBPyConnection, expiry_days: int = 365) -> Set[str]:
+    """
+    Gets a set of tickers that have been marked as untrackable from Polygon API within the expiry period.
+    Tickers marked untrackable longer ago than `expiry_days` will be retried.
+    
+    Common reasons for untrackable:
+    - 404 Not Found (ticker doesn't exist in Polygon's database)
+    - Delisted or invalid tickers
+    """
+    logger.info(f"Querying for Polygon untrackable tickers (expiry: {expiry_days} days) to exclude...")
+    untrackable_set: Set[str] = set()
+    try:
+        # Check if table exists first
+        tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+        if "polygon_untrackable_tickers" in tables:
+            query = f"SELECT ticker FROM polygon_untrackable_tickers WHERE last_failed_timestamp >= (now() - INTERVAL '{expiry_days} days');"
+            results = con.execute(query).fetchall()
+            untrackable_set = {row[0] for row in results}
+            logger.info(f"Found {len(untrackable_set)} Polygon untrackable tickers to skip")
+        else:
+            logger.info("polygon_untrackable_tickers table doesn't exist yet")
+    except Exception as e:
+        logger.warning(f"Could not query polygon_untrackable_tickers: {e}")
+    return untrackable_set
+
+
+def fetch_worker(job: Dict[str, Any], client: Optional[PolygonClient] = None) -> Dict[str, Any]:
     """
     Worker function to fetch ticker details for a single ticker.
-    Runs in separate process.
+    
+    Args:
+        job: Job dict with ticker, api_key, db_path, calls_per_minute
+        client: Optional pre-created client (for single-worker mode to maintain rate limit state)
     """
     ticker = job['ticker']
     api_key = job['api_key']
+    calls_per_minute = job.get('calls_per_minute', DEFAULT_CALLS_PER_MINUTE)
+    db_path = job.get('db_path')  # Get DB path to log failures
     
-    # Create client in this process (can't share across processes)
-    # Use slower rate limit in workers to be safe
-    rate_limiter = PolygonRateLimiter(calls_per_minute=3)  # Conservative pacing
-    client = PolygonClient(api_key, rate_limiter=rate_limiter)
+    # Create client only if not provided (multi-worker mode creates per-process)
+    # For single-worker mode, reuse the provided client to maintain rate limit state
+    if client is None:
+        rate_limiter = PolygonRateLimiter(calls_per_minute=calls_per_minute)
+        client = PolygonClient(api_key, rate_limiter=rate_limiter)
     
     try:
         # Fetch ticker details from v3 API
         details = client.get_ticker_details(ticker)
         
         if not details:
+            error_msg = 'No data returned from Polygon'
+            # Mark as untrackable if we got a definitive 404
+            # (check if the error was a 404 from the client)
             return {
                 'status': 'empty',
                 'ticker': ticker,
-                'error': 'No data returned from Polygon'
+                'error': error_msg
             }
         
         # Add fetch timestamp
@@ -251,10 +288,39 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         error_msg = str(e)
         logger.warning(f"❌ {ticker}: {error_msg}")
+        
+        # Check if this is a permanent error (4xx client errors) that should be tracked
+        is_permanent_error = (
+            '400' in error_msg or 'Bad Request' in error_msg or
+            '404' in error_msg or 'Not Found' in error_msg or
+            'Client Error' in error_msg
+        )
+        
+        if is_permanent_error and db_path:
+            # Mark ticker as untrackable in database to avoid wasting future API calls
+            try:
+                with ManagedDatabaseConnection(db_path_override=db_path, read_only=False) as conn:
+                    if conn:
+                        conn.execute("""
+                            CREATE TABLE IF NOT EXISTS polygon_untrackable_tickers (
+                                ticker VARCHAR NOT NULL COLLATE NOCASE PRIMARY KEY,
+                                reason VARCHAR,
+                                last_failed_timestamp TIMESTAMPTZ
+                            );
+                        """)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO polygon_untrackable_tickers VALUES (?, ?, ?);",
+                            [ticker, error_msg, datetime.now(timezone.utc)]
+                        )
+                        logger.info(f"🚫 Marked {ticker} as Polygon-untrackable (client error) in database")
+            except Exception as db_e:
+                logger.error(f"Failed to mark {ticker} as untrackable: {db_e}")
+        
         return {
             'status': 'error',
             'ticker': ticker,
-            'error': error_msg
+            'error': error_msg,
+            'is_permanent': is_permanent_error
         }
 
 
@@ -292,7 +358,10 @@ def run_polygon_ticker_info_pipeline(
     
     # Get max workers
     max_workers = config.get_optional_int("POLYGON_MAX_WORKERS", DEFAULT_MAX_WORKERS)
-    logger.info(f"Using up to {max_workers} workers")
+    calls_per_minute = config.get_optional_int("POLYGON_CALLS_PER_MINUTE", DEFAULT_CALLS_PER_MINUTE)
+    # Ensure we have a valid value (shouldn't be None with default, but be safe)
+    calls_per_minute = calls_per_minute if calls_per_minute is not None else DEFAULT_CALLS_PER_MINUTE
+    logger.info(f"Using up to {max_workers} workers at {calls_per_minute} calls/min")
 
     # Runtime & refresh windows from env
     max_runtime_hours_env = config.get_optional_float("POLYGON_INFO_MAX_RUNTIME_HOURS", DEFAULT_INFO_MAX_RUNTIME_HOURS)
@@ -348,10 +417,26 @@ def run_polygon_ticker_info_pipeline(
             tickers_to_fetch = tickers_to_fetch[:limit]
             logger.info(f"Applied limit: processing first {len(tickers_to_fetch)} prioritized tickers")
 
+        # Get untrackable tickers (404s, etc.) to skip
+        untrackable_tickers = get_polygon_untrackable_tickers(con, expiry_days=365)
+        tickers_to_fetch = [t for t in tickers_to_fetch if t not in untrackable_tickers]
+        skipped_untrackable = len(all_tickers) - len(tickers_to_fetch) - skipped
+        
+        if skipped_untrackable > 0:
+            logger.info(f"Skipping {skipped_untrackable} previously failed (untrackable) tickers")
+        
         logger.info(f"Will fetch info for {len(tickers_to_fetch)} tickers (prioritize={prioritize})")
     
-    # Create jobs
-    jobs = [{'ticker': ticker, 'api_key': api_key} for ticker in tickers_to_fetch]
+    # Create jobs with db_path for failure tracking
+    jobs = [
+        {
+            'ticker': ticker,
+            'api_key': api_key,
+            'db_path': str(config.DB_FILE),
+            'calls_per_minute': calls_per_minute
+        }
+        for ticker in tickers_to_fetch
+    ]
     
     # Process jobs
     results = []
@@ -399,10 +484,14 @@ def run_polygon_ticker_info_pipeline(
         logger.info(f"📦 Wrote batch of {len(df)} ticker info records to {file.name}")
 
     if max_workers == 1:
+        # Single-worker mode: create ONE shared client to maintain rate limit state
+        rate_limiter = PolygonRateLimiter(calls_per_minute=calls_per_minute)
+        shared_client = PolygonClient(api_key, rate_limiter=rate_limiter)
         for job in jobs:
-            if not handle_result(fetch_worker(job)):
+            if not handle_result(fetch_worker(job, client=shared_client)):
                 break
     else:
+        # Multi-worker mode: each process creates its own client (can't share across processes)
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(fetch_worker, job): job for job in jobs}
             for future in as_completed(futures):

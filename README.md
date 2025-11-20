@@ -182,6 +182,66 @@ python update_from_parquet.py
 python update_from_parquet.py --no-checkpoint
 ```
 
+## Supplementary Loading Methodology
+
+Supplementary (non-core EDGAR) datasets are loaded using two distinct strategies, chosen per table based on data evolution patterns and risk tolerance for historical replacement:
+
+**Snapshot (Blue-Green Atomic Swap)**
+- Tables whose entire historical dataset is regenerated each gather run (e.g. macroeconomic time series, market risk factors) are loaded through a staging table (`<table>_new`).
+- Data is bulk inserted into the staging table; uniqueness is enforced via PRIMARY KEYs and supporting indexes.
+- After successful staging, an atomic swap (`DROP TABLE` + `ALTER TABLE RENAME`) replaces the live table. Failed swaps roll back cleanly.
+- Guarantees: no partial updates; consistent point-in-time view.
+
+**Incremental (Drip-Feed Upsert)**
+- Tables that accumulate new events (e.g. `stock_history`, `stock_fetch_errors`, `yf_stock_actions`, `yf_recommendations`, `yf_info_fetch_errors`) ingest only new batches.
+- A batch staging table (`<table>_batch`) is populated from all matching parquet files, then merged using `INSERT OR REPLACE` into the base table (PRIMARY KEY required).
+- Old rows remain unless a batch includes an updated value for the same key.
+- Guarantees: append-or-update semantics without full historical reload.
+
+The authoritative classification and deeper rationale (including future enhancement notes) is documented in [`SUPPLEMENTARY_LOADING_METHOD.md`](SUPPLEMENTARY_LOADING_METHOD.md).
+
+### Ticker Info Loader (Polygon / Massive)
+`updated_ticker_info` uses both modes:
+- Default execution performs an incremental upsert (existing ticker rows are updated in-place).
+- Pass `--full-refresh` to perform a blue-green replacement (use after large schema or source changes).
+
+Usage examples:
+```bash
+# Incremental (default)
+python data_processing/load_ticker_info.py
+
+# Full refresh atomic swap
+python data_processing/load_ticker_info.py --full-refresh
+```
+
+### Massive Ticker Enrichment Parquet Backups
+`ticker_enrichment_massive.py` writes a timestamped parquet backup for every enrichment batch under `PARQUET_DIR/massive_tickers/` (e.g. `massive_tickers_batch_20240131_235959.parquet`). These files:
+- Provide an audit trail of enrichment inputs.
+- Allow reconstruction or replays if the database must be restored.
+- Are safe to prune by age once downstream validation is complete.
+
+### Operational Safety Notes
+- All snapshot tables have PRIMARY KEY constraints enabling deterministic `INSERT OR REPLACE` usage during staging (even if duplicates arise in inputs).
+- Incremental tables avoid `DROP` operations—reduces accidental data loss risk during partial runs.
+- **Swap Guards**: Blue-green snapshot loaders abort atomic swap operations when staging row count is less than existing table, preventing accidental data reduction or loss. Ticker info loader additionally validates distinct ticker count to prevent universe contraction.
+- Empty staging detection: loaders refuse to swap when staging is empty but existing table contains data (logged as error with retention of original).
+- Backups: parquet artifacts themselves are the provenance layer; consider offloading older batches to cold storage for long-term retention.
+
+### Adding New Supplementary Tables
+1. Define a schema with an appropriate PRIMARY KEY in `load_supplementary_data.py`.
+2. Decide classification: snapshot vs incremental (see methodology doc).
+3. Emit parquet via a gatherer script using deterministic column ordering.
+4. Load with either incremental merge or blue-green swap; update documentation and tests accordingly.
+5. Add validation queries (distribution checks, row counts) where appropriate.
+
+### Quick Reference
+| Strategy | When to Use | Mechanism | Risk Mitigated |
+|----------|-------------|-----------|----------------|
+| Blue-Green Swap | Regenerated full datasets | Staging + atomic rename | Partial/corrupted historical reloads |
+| Incremental Upsert | Event-based growth | Batch staging + upsert | Unnecessary full reload & data churn |
+
+For full details, including planned enhancements (audit table, empty-swap guards, batch lineage), see [`SUPPLEMENTARY_LOADING_METHOD.md`](SUPPLEMENTARY_LOADING_METHOD.md).
+
 ## Testing
 
 The repository includes unit and integration tests under the `tests/` directory. Tests use a virtual environment and the project's test fixtures.

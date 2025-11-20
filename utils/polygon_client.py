@@ -35,27 +35,63 @@ class PolygonRateLimiter:
     """
     Rate limiter for Massive.com (formerly Polygon.io) API.
     Free tier: 5 calls per minute.
+    
+    Uses a sliding window approach to track actual request timestamps
+    and ensure we never exceed the limit.
     """
     
     def __init__(self, calls_per_minute: int = 5):
         self.calls_per_minute = calls_per_minute
-        self.min_interval = 60.0 / calls_per_minute  # seconds between calls
-        self.last_call_time: Optional[float] = None
-        self.call_count = 0
+        self.window_seconds = 60.0  # 1 minute sliding window
+        self.request_timestamps: List[float] = []  # Track actual request times
         
     def wait_if_needed(self):
-        """Wait if necessary to respect rate limits."""
-        if self.last_call_time is not None:
-            elapsed = time.time() - self.last_call_time
-            if elapsed < self.min_interval:
-                wait_time = self.min_interval - elapsed
-                logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
-                # Add a small random jitter to avoid sync storms
-                jitter = min(1.0, wait_time * 0.1)
-                time.sleep(wait_time + (jitter * (0.5 - time.time() % 1)))
+        """Wait if necessary to respect rate limits using sliding window."""
+        now = time.time()
         
-        self.last_call_time = time.time()
-        self.call_count += 1
+        # Remove requests older than the window
+        cutoff = now - self.window_seconds
+        self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
+        
+        # If we're at the limit, wait until the oldest request expires
+        if len(self.request_timestamps) >= self.calls_per_minute:
+            oldest = self.request_timestamps[0]
+            wait_time = (oldest + self.window_seconds) - now + 2.0  # Add 2s buffer for safety
+            if wait_time > 0:
+                logger.info(f"Rate limit: {len(self.request_timestamps)}/{self.calls_per_minute} calls in window. Waiting {wait_time:.1f}s")
+                time.sleep(wait_time)
+                # Clean up again after waiting
+                now = time.time()
+                cutoff = now - self.window_seconds
+                self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
+        
+        # Add a small delay between ALL requests (even when under limit) to be extra conservative
+        # This helps avoid burst traffic that might trigger undocumented rate limits
+        if self.request_timestamps:  # If we've made any requests before
+            time_since_last = now - self.request_timestamps[-1]
+            min_spacing = 20.0  # Minimum 20 seconds between requests (3 per minute = one every 20s)
+            if time_since_last < min_spacing:
+                delay = min_spacing - time_since_last
+                logger.info(f"Spacing requests: waiting {delay:.1f}s since last call")
+                time.sleep(delay)
+                now = time.time()  # Update timestamp after the delay
+        
+        # Record this request at the current time (will be just before the actual HTTP call)
+        self.request_timestamps.append(now)
+        
+    def record_request(self):
+        """
+        DEPRECATED: Request recording now happens in wait_if_needed().
+        This method is kept for backward compatibility but does nothing.
+        """
+        pass
+    
+    def on_rate_limit_hit(self):
+        """Called when a 429 is encountered. Reduces calls per minute."""
+        old_limit = self.calls_per_minute
+        self.calls_per_minute = max(1, self.calls_per_minute - 1)  # Drop by 1, minimum 1
+        logger.warning(f"Rate limit hit! Reducing from {old_limit} to {self.calls_per_minute} calls/min")
+        # Keep existing timestamps - they already reflect actual call history
 
 
 class PolygonClient:
@@ -128,23 +164,25 @@ class PolygonClient:
                 
                 # Check for rate limit (429) or server errors (5xx)
                 if response.status_code == 429:
-                    # Honor Retry-After header if present, otherwise use aggressive backoff
+                    # After a 429, we need to wait for our window to clear completely
+                    # Call the rate limiter callback first
+                    try:
+                        self.rate_limiter.on_rate_limit_hit()
+                    except Exception:
+                        pass
+                    
+                    # Honor Retry-After header if present, otherwise wait for full window + buffer
                     ra = response.headers.get('Retry-After')
                     try:
                         wait_time = float(ra) if ra is not None else (self.retry_delay * (3 ** attempt))
                     except Exception:
                         wait_time = self.retry_delay * (3 ** attempt)
-
-                    # Add jitter to avoid thundering herd
-                    jitter = min(5.0, wait_time * 0.2)
-                    sleep_time = wait_time + (jitter * (0.5 - time.time() % 1))
-                    logger.warning(f"Rate limit hit (429). Waiting {sleep_time:.1f}s before retry {attempt + 1}/{self.max_retries}")
-                    time.sleep(sleep_time)
-                    # After a 429, significantly increase internal spacing to prevent future limits
-                    try:
-                        self.rate_limiter.min_interval = max(self.rate_limiter.min_interval, 15.0)
-                    except Exception:
-                        pass
+                    
+                    # Ensure we wait at least 60 seconds to let the rate limit window reset
+                    wait_time = max(wait_time, 60.0)
+                    
+                    logger.warning(f"Rate limit hit (429). Waiting {wait_time:.1f}s before retry {attempt + 1}/{self.max_retries}")
+                    time.sleep(wait_time)
                     continue
                     
                 if response.status_code >= 500:
@@ -152,6 +190,10 @@ class PolygonClient:
                     logger.warning(f"Server error ({response.status_code}). Retrying in {wait_time}s")
                     time.sleep(wait_time)
                     continue
+                
+                # Don't retry on 4xx client errors - these are permanent (bad request, not found, etc.)
+                if 400 <= response.status_code < 500:
+                    response.raise_for_status()  # Raise immediately without retry
                 
                 # Raise for other HTTP errors
                 response.raise_for_status()
@@ -175,6 +217,11 @@ class PolygonClient:
                     raise
                     
             except requests.exceptions.RequestException as e:
+                # Don't retry on 4xx client errors - these are permanent (bad request, not found, etc.)
+                error_str = str(e)
+                if any(code in error_str for code in ['400', '401', '403', '404']) or 'Client Error' in error_str:
+                    raise
+                    
                 if attempt < self.max_retries - 1:
                     wait_time = self.retry_delay * (2 ** attempt)
                     logger.warning(f"Request failed: {e}. Retrying in {wait_time}s")
@@ -210,11 +257,14 @@ class PolygonClient:
         Example:
             bars = client.get_aggregates('AAPL', date(2023, 1, 1), date(2023, 12, 31))
         """
+        # Normalize ticker: Polygon API expects periods, not dashes (e.g., ABR.PD not ABR-PD)
+        normalized_ticker = ticker.replace('-', '.')
+        
         # Ensure dates are in YYYY-MM-DD format (not datetime with time)
         from_str = from_date.strftime('%Y-%m-%d') if hasattr(from_date, 'strftime') else str(from_date)
         to_str = to_date.strftime('%Y-%m-%d') if hasattr(to_date, 'strftime') else str(to_date)
         
-        endpoint = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_str}/{to_str}"
+        endpoint = f"/v2/aggs/ticker/{normalized_ticker}/range/{multiplier}/{timespan}/{from_str}/{to_str}"
         
         params = {
             'adjusted': 'true',  # Adjust for splits
@@ -253,7 +303,9 @@ class PolygonClient:
             primary_exchange, type, active status, cik, currency, etc.
             Returns None if not found
         """
-        endpoint = f"/v3/reference/tickers/{ticker}"
+        # Normalize ticker: Polygon API expects periods, not dashes (e.g., ABR.PD not ABR-PD)
+        normalized_ticker = ticker.replace('-', '.')
+        endpoint = f"/v3/reference/tickers/{normalized_ticker}"
         
         try:
             data = self._make_request(endpoint)

@@ -82,6 +82,16 @@ def run_market_risk_pipeline(config: AppConfig):
             else:
                  ff_data['date'] = pd.to_datetime(ff_data['date']).dt.date
 
+            # Normalize factor column names to lowercase to align with DuckDB schema
+            rename_map = {c: c.lower() for c in ['SMB', 'HML', 'RMW', 'CMA', 'RF'] if c in ff_data.columns}
+            ff_data.rename(columns=rename_map, inplace=True)
+
+            # Basic duplicate diagnostics (per date within this model)
+            if ff_data.duplicated(subset=['date']).any():
+                dup_count = ff_data.duplicated(subset=['date']).sum()
+                logger.warning(f"Detected {dup_count} duplicate date rows within model '{model_name}'. Keeping first occurrences.")
+                ff_data = ff_data.drop_duplicates(subset=['date'], keep='first')
+
             all_factors_data.append(ff_data)
             logger.info(f"Successfully fetched and processed {len(ff_data)} data points for '{dataset_name}'.")
             time.sleep(api_delay)
@@ -91,9 +101,17 @@ def run_market_risk_pipeline(config: AppConfig):
 
     if all_factors_data:
         final_df = pd.concat(all_factors_data, ignore_index=True)
-        cols_order = ['date', 'factor_model', 'mkt_minus_rf', 'SMB', 'HML', 'RMW', 'CMA', 'RF']
+        # Unified column order matching DuckDB schema (lowercase factor names)
+        cols_order = ['date', 'factor_model', 'mkt_minus_rf', 'smb', 'hml', 'rmw', 'cma', 'rf']
         final_df = final_df[[c for c in cols_order if c in final_df.columns]]
-        
+
+        # Drop any cross-model duplicates on (date, factor_model) just in case
+        before = len(final_df)
+        final_df = final_df.drop_duplicates(subset=['date', 'factor_model'], keep='first')
+        after = len(final_df)
+        if after < before:
+            logger.info(f"Removed {before - after} cross-model duplicate rows (date, factor_model).")
+
         parquet_converter.save_dataframe_to_parquet(final_df, config.PARQUET_DIR / MARKET_RISK_TABLE_NAME)
 
     end_time = time.time()

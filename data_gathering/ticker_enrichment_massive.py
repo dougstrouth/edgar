@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ticker Enrichment from Massive.com v3 API
+Massive.com v3 Ticker Enrichment
 
-Enriches the tickers table with additional metadata from Massive.com's v3 reference API.
-This adds fields like active status, FIGI identifiers, market classification, etc.
+Fetches and enriches ticker metadata from Massive.com's reference API and upserts
+into `massive_tickers` using `INSERT OR REPLACE` on a PRIMARY KEY (`ticker`).
+
+Key behaviors:
+ - Writes a timestamped parquet backup for every batch to `PARQUET_DIR/massive_tickers/`
+     (e.g. `massive_tickers_batch_<UTC_TIMESTAMP>.parquet`) for audit & replay.
+ - Uses a temporary staging table `massive_tickers_batch` to ensure deterministic
+     batch application before upsert.
+ - Creates the base table if absent with a minimal schema (compatible with enrichment output).
 
 Usage:
-    python data_gathering/ticker_enrichment_massive.py [--limit N] [--active-only]
-    python main.py enrich-tickers
+        python data_gathering/ticker_enrichment_massive.py [--limit N] [--active-only]
+        python main.py enrich-tickers
+
+See `SUPPLEMENTARY_LOADING_METHOD.md` for general loading strategy context.
 """
 
 import sys
 import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import pandas as pd
-from tqdm import tqdm
+from datetime import datetime, timezone
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -35,7 +44,7 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 def enrich_tickers_from_massive(
     config: AppConfig,
-    limit: int = None,
+    limit: Optional[int] = None,
     active_only: bool = True
 ):
     """
@@ -85,6 +94,16 @@ def enrich_tickers_from_massive(
     # Convert to DataFrame
     df = pd.DataFrame(formatted_tickers)
     logger.info(f"Prepared {len(df)} tickers for database update")
+
+    # Parquet backup directory
+    parquet_backup_dir = config.PARQUET_DIR / "massive_tickers"
+    parquet_backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_file = parquet_backup_dir / f"massive_tickers_batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.parquet"
+    try:
+        df.to_parquet(backup_file, index=False, engine='pyarrow', compression='snappy')
+        logger.info(f"📦 Wrote parquet backup: {backup_file.name}")
+    except Exception as e:
+        logger.warning(f"Failed to write parquet backup ({backup_file}): {e}")
     
     # Update database
     logger.info("Updating tickers table in database...")
@@ -93,20 +112,48 @@ def enrich_tickers_from_massive(
             logger.critical("Failed to connect to database")
             return
         
+        # Ensure base table exists (schema is defined in edgar_data_loader; create minimal if missing)
+        tables = {r[0].lower() for r in con.execute("SHOW TABLES;").fetchall()}
+        if "massive_tickers" not in tables:
+            logger.info("Creating massive_tickers table (not found)...")
+            con.execute("""
+                CREATE TABLE massive_tickers (
+                    ticker VARCHAR PRIMARY KEY COLLATE NOCASE,
+                    cik VARCHAR(10),
+                    name VARCHAR,
+                    market VARCHAR,
+                    locale VARCHAR,
+                    primary_exchange VARCHAR,
+                    type VARCHAR,
+                    active BOOLEAN,
+                    currency_name VARCHAR,
+                    currency_symbol VARCHAR,
+                    base_currency_name VARCHAR,
+                    base_currency_symbol VARCHAR,
+                    composite_figi VARCHAR,
+                    share_class_figi VARCHAR,
+                    last_updated_utc TIMESTAMP,
+                    delisted_utc TIMESTAMP,
+                    source VARCHAR DEFAULT 'massive.com_v3_api',
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
         # Register DataFrame as temporary view
         con.register('new_tickers', df)
-        
-        # Merge/upsert into massive_tickers table (separate from SEC tickers table)
-        # Use INSERT OR REPLACE to update existing tickers or insert new ones
-        merge_query = """
-            INSERT OR REPLACE INTO massive_tickers
-            SELECT * FROM new_tickers
-        """
-        
+        # Use staging batch table for atomic upsert
+        con.execute("DROP TABLE IF EXISTS massive_tickers_batch;")
+        con.execute("CREATE TEMP TABLE massive_tickers_batch AS SELECT * FROM new_tickers;")
+        con.unregister('new_tickers')
+
         try:
-            con.execute(merge_query)
-            rows_affected = con.execute("SELECT COUNT(*) FROM massive_tickers").fetchone()[0]
-            logger.info(f"✅ Successfully updated massive_tickers table ({rows_affected} total tickers)")
+            con.execute("""
+                INSERT OR REPLACE INTO massive_tickers
+                SELECT * FROM massive_tickers_batch;
+            """)
+            rows_affected_row = con.execute("SELECT COUNT(*) FROM massive_tickers").fetchone()
+            rows_affected = rows_affected_row[0] if rows_affected_row else 0
+            logger.info(f"✅ Successfully upserted batch; table now has {rows_affected} tickers total")
             
             # Show sample of enriched data
             sample = con.execute("""
@@ -121,7 +168,7 @@ def enrich_tickers_from_massive(
                 logger.info(f"  {row[0]:8} | {row[1][:30]:30} | Active: {row[2]} | {row[3]} | {row[4]} | {row[5]}")
                 
         except Exception as e:
-            logger.error(f"Failed to update tickers table: {e}", exc_info=True)
+            logger.error(f"Failed to upsert massive_tickers batch: {e}", exc_info=True)
             return
     
     logger.info("=" * 80)

@@ -287,8 +287,8 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     api_key = job['api_key']
     
     # Create client in this process (can't share across processes)
-    # Use conservative rate limit in workers to avoid 429s
-    rate_limiter = PolygonRateLimiter(calls_per_minute=3)  # Conservative: 3/min to handle bursts
+    # Use ultra-conservative rate limit: 2 calls/min (even 404s count against limit!)
+    rate_limiter = PolygonRateLimiter(calls_per_minute=2)
     client = PolygonClient(api_key, rate_limiter=rate_limiter, max_retries=3, retry_delay=10.0)
     
     try:
