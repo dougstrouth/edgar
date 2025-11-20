@@ -11,7 +11,7 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
 *   **Atomic Database Updates**: The data loading process uses a "blue-green" deployment strategy. Data is loaded into temporary tables, and only upon successful completion are the live tables atomically swapped. This ensures the database is never left in a corrupted or incomplete state, even if a load fails midway.
 *   **Data Ordering for Performance**: During the database load, the largest tables (`xbrl_facts` and `filings`) are pre-sorted on commonly queried columns (like `cik`, `form`, and `filing_date`). This significantly improves query performance by making DuckDB's automatic zonemap indexes more effective.
 *   **Supplementary Data Integration**:
-    *   **Polygon.io (Stocks)**: Fetches historical stock prices (OHLCV) with a generous free tier (5 calls/minute, 1-day delay). Backfills years of daily data reliably.
+    *   **Massive.com (formerly Polygon.io) – Stocks**: Fetches historical stock prices (OHLCV) with a generous free tier (5 calls/minute, 1-day delay). Backfills years of daily data reliably.
     *   **Yahoo Finance**: Fetches company profile information, financial statements, and corporate actions.
     *   **Federal Reserve (FRED)**: Gathers key macroeconomic time-series data (e.g., GDP, CPI, interest rates) to provide economic context for financial models.
 *   **Resilient API Interaction**:
@@ -58,7 +58,8 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
     *   `SEC_USER_AGENT`: A descriptive User-Agent for making requests to the SEC (e.g., `YourName YourOrg your.email@example.com`). **This is required by the SEC.**
     *   `FRED_API_KEY`: Your API key for the FRED service (optional, if using `gather-macro`).
     *   `POLYGON_API_KEY`: Your API key from Massive.com (formerly Polygon.io) - free tier works.
-    *   `POLYGON_MAX_WORKERS` (optional): Parallel workers for the Polygon gatherer (default: 2; free tier is 5 req/min, so keep small).
+    *   `POLYGON_MAX_WORKERS` (optional): Parallel workers for Massive/Polygon gatherers. For free tier, keep at `1`.
+    *   `POLYGON_CALLS_PER_MINUTE` (optional): Effective client-side cap for Massive API calls per minute (default: 3; max: 5 on free tier). The client also spaces calls by ~20s to avoid burst 429s.
 
 ## Project Structure
 
@@ -129,6 +130,25 @@ python main.py gather-stocks-polygon -- --mode initial_load --limit 50
 python data_processing/load_supplementary_data.py stock_history
 ```
 
+### Stocks: Loader and De-duplication
+The `stock_history` table uses incremental upserts with a composite primary key on `(ticker, date)`. This ensures no duplicates and that re-runs replace existing rows for the same day:
+
+- Table schema constraint: `PRIMARY KEY (ticker, date)`
+- Merge behavior: `INSERT OR REPLACE` from a batch staging table
+- De-duplication is automatic at the database level
+
+Quick duplicate check (expects `duckdb` installed):
+```bash
+python - <<'PY'
+import duckdb
+con = duckdb.connect('/absolute/path/to/edgar_analytics.duckdb', read_only=True)
+total = con.execute('SELECT COUNT(*) FROM stock_history').fetchone()[0]
+unique = con.execute('SELECT COUNT(DISTINCT (ticker, date)) FROM stock_history').fetchone()[0]
+print('Total:', total, 'Unique:', unique, 'Duplicates:', total-unique)
+con.close()
+PY
+```
+
 **Other Commands:**
 ```bash
 # Run feature engineering scripts
@@ -153,6 +173,17 @@ Validate connectivity and estimate capacity:
 python tests/test_polygon_capacity.py
 ```
 This checks your `POLYGON_API_KEY`, fetches sample tickers, and estimates effective calls/min under rate limits.
+
+### Massive.com Client & Rate Limiting
+The built-in client targets `https://api.massive.com` (Polygon rebrand) and applies conservative rate limiting suitable for the free tier:
+
+- Default cap is `POLYGON_CALLS_PER_MINUTE=3` with ~20s spacing between requests to avoid burst 429s; you can raise to 4–5 if stable.
+- 404 responses (unknown tickers) still count against your quota; failed requests are tracked to avoid repeated waste.
+- Tickers with dashes are normalized to dot notation (e.g., `AAM-UN` → `AAM.UN`).
+
+Environment knobs:
+- `POLYGON_MAX_WORKERS=1` (recommended for free tier)
+- `POLYGON_CALLS_PER_MINUTE=3` (safe default; max 5 on free tier)
 
 ## VS Code Debugging
 
@@ -199,6 +230,21 @@ Supplementary (non-core EDGAR) datasets are loaded using two distinct strategies
 - Guarantees: append-or-update semantics without full historical reload.
 
 The authoritative classification and deeper rationale (including future enhancement notes) is documented in [`SUPPLEMENTARY_LOADING_METHOD.md`](SUPPLEMENTARY_LOADING_METHOD.md).
+
+### DuckDB Primary Key Enforcement for Incremental Tables
+Some legacy databases created before PKs were added may lack the required primary key on `stock_history`. The loader now auto-detects this scenario and performs a safe in-place migration:
+
+1. Back up existing rows to a temporary table
+2. Drop and recreate the base table with the proper `PRIMARY KEY`
+3. Restore the data, then proceed with `INSERT OR REPLACE` upserts
+
+If you encountered this error previously:
+
+```
+Binder Error: There are no UNIQUE/PRIMARY KEY Indexes that refer to this table, ON CONFLICT is a no-op
+```
+
+Re-run the loader and it will auto-correct the schema before the merge.
 
 ### Ticker Info Loader (Polygon / Massive)
 `updated_ticker_info` uses both modes:
