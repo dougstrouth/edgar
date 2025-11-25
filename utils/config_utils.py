@@ -16,8 +16,9 @@ from typing import Optional
 
 # Set up a logger specifically for config loading issues
 config_logger = logging.getLogger(__name__)
-# Basic config in case logging isn't set up by the main script yet
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
+# Only configure root logger if no handlers exist (prevents duplicate logs)
+if not logging.root.handlers:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
 
 
 class AppConfig:

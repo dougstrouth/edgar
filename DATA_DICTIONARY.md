@@ -95,7 +95,7 @@ This document provides a detailed description of the database schema used in the
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `series_id` | `VARCHAR` | |
-| `date` | `TIMESTAMP_NS` | |
+| `date` | `DATE` | |
 | `value` | `DOUBLE` | |
 
 ### `market_risk_factors`
@@ -105,21 +105,110 @@ This document provides a detailed description of the database schema used in the
 | `date` | `DATE` | |
 | `factor_model` | `VARCHAR` | |
 | `mkt_minus_rf` | `DOUBLE` | |
-| `SMB` | `DOUBLE` | |
-| `HML` | `DOUBLE` | |
-| `RMW` | `DOUBLE` | |
-| `CMA` | `DOUBLE` | |
-| `RF` | `DOUBLE` | |
+| `smb` | `DOUBLE` | |
+| `hml` | `DOUBLE` | |
+| `rmw` | `DOUBLE` | |
+| `cma` | `DOUBLE` | |
+| `rf` | `DOUBLE` | |
+
+### `prioritized_tickers_stock_backlog`
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `ticker` | `VARCHAR` | |
+| `cik` | `VARCHAR` | |
+| `unique_tag_count` | `BIGINT` | |
+| `key_metric_count` | `INTEGER` | |
+| `last_date` | `TIMESTAMP` | |
+| `record_count` | `BIGINT` | |
+| `recent_filings` | `BIGINT` | |
+| `stock_need_score` | `BIGINT` | |
+| `staleness_days` | `BIGINT` | |
+| `score` | `DOUBLE` | |
+| `rank` | `BIGINT` | |
+| `generated_at` | `TIMESTAMP WITH TIME ZONE` | |
+| `weights_json` | `VARCHAR` | |
+| `start_date` | `TIMESTAMP` | |
+| `end_date` | `TIMESTAMP` | |
+
+### `stock_fetch_plan`
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `ticker` | `VARCHAR` | |
+| `rank` | `BIGINT` | |
+| `score` | `DOUBLE` | |
+| `cik` | `VARCHAR` | |
+| `unique_tag_count` | `BIGINT` | |
+| `key_metric_count` | `INTEGER` | |
+| `last_date` | `TIMESTAMP` | |
+| `record_count` | `BIGINT` | |
+| `backlog_staleness_days` | `BIGINT` | |
+| `status` | `VARCHAR` | |
+| `start_date` | `TIMESTAMP` | |
+| `end_date` | `TIMESTAMP` | |
+| `generated_at` | `TIMESTAMP WITH TIME ZONE` | |
+
+### `stock_history`
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `ticker` | `VARCHAR` | |
+| `date` | `DATE` | |
+| `open` | `DOUBLE` | |
+| `high` | `DOUBLE` | |
+| `low` | `DOUBLE` | |
+| `close` | `DOUBLE` | |
+| `adj_close` | `DOUBLE` | |
+| `volume` | `BIGINT` | |
 
 ### `tickers`
 
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `cik` | `VARCHAR` | |
+| `ticker` | `VARCHAR` | |
 | `exchange` | `VARCHAR` | |
 | `source` | `VARCHAR` | |
+
+### `updated_ticker_info`
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
 | `ticker` | `VARCHAR` | |
-| `rn` | `BIGINT` | |
+| `cik` | `VARCHAR` | |
+| `name` | `VARCHAR` | |
+| `market` | `VARCHAR` | |
+| `locale` | `VARCHAR` | |
+| `primary_exchange` | `VARCHAR` | |
+| `type` | `VARCHAR` | |
+| `active` | `BOOLEAN` | |
+| `currency_name` | `VARCHAR` | |
+| `currency_symbol` | `VARCHAR` | |
+| `base_currency_name` | `VARCHAR` | |
+| `base_currency_symbol` | `VARCHAR` | |
+| `composite_figi` | `VARCHAR` | |
+| `share_class_figi` | `VARCHAR` | |
+| `description` | `VARCHAR` | |
+| `homepage_url` | `VARCHAR` | |
+| `total_employees` | `BIGINT` | |
+| `list_date` | `VARCHAR` | |
+| `sic_code` | `VARCHAR` | |
+| `sic_description` | `VARCHAR` | |
+| `ticker_root` | `VARCHAR` | |
+| `source_feed` | `VARCHAR` | |
+| `market_cap` | `DOUBLE` | |
+| `weighted_shares_outstanding` | `BIGINT` | |
+| `round_lot` | `INTEGER` | |
+| `last_updated_utc` | `TIMESTAMP WITH TIME ZONE` | |
+| `delisted_utc` | `TIMESTAMP WITH TIME ZONE` | |
+| `address_1` | `VARCHAR` | |
+| `city` | `VARCHAR` | |
+| `state` | `VARCHAR` | |
+| `postal_code` | `VARCHAR` | |
+| `logo_url` | `VARCHAR` | |
+| `icon_url` | `VARCHAR` | |
+| `fetch_timestamp` | `TIMESTAMP WITH TIME ZONE` | |
 
 ### `xbrl_facts`
 
@@ -166,4 +255,12 @@ This document provides a detailed description of the database schema used in the
 | `label` | `VARCHAR` | |
 | `description` | `VARCHAR` | |
 | `rn` | `BIGINT` | |
+
+### `yf_fetch_status`
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `fetch_date` | `DATE` | |
+| `fetched_count` | `INTEGER` | |
+| `attempted_count` | `INTEGER` | |
 

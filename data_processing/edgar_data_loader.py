@@ -50,8 +50,32 @@ SCHEMA = {
         );""",
     "tickers": """
         CREATE TABLE IF NOT EXISTS tickers (
-            cik VARCHAR(10) NOT NULL, ticker VARCHAR NOT NULL COLLATE NOCASE, exchange VARCHAR NOT NULL COLLATE NOCASE, source VARCHAR
+            cik VARCHAR(10) NOT NULL,
+            ticker VARCHAR NOT NULL COLLATE NOCASE,
+            exchange VARCHAR NOT NULL COLLATE NOCASE,
+            source VARCHAR
             -- PK handled by INSERT OR REPLACE logic, FKs slow down bulk loads
+        );""",
+    "massive_tickers": """
+        CREATE TABLE IF NOT EXISTS massive_tickers (
+            ticker VARCHAR PRIMARY KEY COLLATE NOCASE,
+            cik VARCHAR(10),
+            name VARCHAR,
+            market VARCHAR,
+            locale VARCHAR,
+            primary_exchange VARCHAR,
+            type VARCHAR,
+            active BOOLEAN,
+            currency_name VARCHAR,
+            currency_symbol VARCHAR,
+            base_currency_name VARCHAR,
+            base_currency_symbol VARCHAR,
+            composite_figi VARCHAR,
+            share_class_figi VARCHAR,
+            last_updated_utc TIMESTAMP,
+            delisted_utc TIMESTAMP,
+            source VARCHAR DEFAULT 'massive.com_v3_api',
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );""",
     "former_names": """
         CREATE TABLE IF NOT EXISTS former_names (
@@ -165,11 +189,16 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                                 SELECT *, ROW_NUMBER() OVER(PARTITION BY cik) as rn FROM read_parquet('{parquet_path}/*.parquet')
                             ) WHERE rn = 1;""")
                     elif table == "tickers":
-                        # Special handling for tickers to ensure ticker, exchange is unique
                         db_conn.execute(f"""
-                            CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
-                                SELECT *, ROW_NUMBER() OVER(PARTITION BY ticker, exchange) as rn FROM read_parquet('{parquet_path}/*.parquet')
-                            ) WHERE rn = 1;""")
+                            CREATE OR REPLACE TABLE {table_new} AS
+                            SELECT t.cik, t.ticker, t.exchange, t.source
+                            FROM (
+                                SELECT cik, ticker, exchange, source,
+                                       ROW_NUMBER() OVER(PARTITION BY ticker, exchange) AS rn
+                                FROM read_parquet('{parquet_path}/*.parquet')
+                            ) t
+                            JOIN companies_new c ON t.cik = c.cik
+                            WHERE t.rn = 1;""")
                     elif table == "xbrl_tags":
                         # Special handling for xbrl_tags to ensure taxonomy, tag_name is unique
                         db_conn.execute(f"""
@@ -177,7 +206,14 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                                 SELECT *, ROW_NUMBER() OVER(PARTITION BY taxonomy, tag_name) as rn FROM read_parquet('{parquet_path}/*.parquet')
                             ) WHERE rn = 1;""")
                     else:
-                        db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
+                        if table == "former_names":
+                            db_conn.execute(f"""
+                                CREATE OR REPLACE TABLE {table_new} AS
+                                SELECT f.*
+                                FROM read_parquet('{parquet_path}/*.parquet') f
+                                JOIN companies_new c ON f.cik = c.cik;""")
+                        else:
+                            db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
                 else:
                     logger.warning(f"Parquet directory for '{table}' not found or empty. Creating empty new table.")
                     db_conn.execute(SCHEMA[table].replace(f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE OR REPLACE TABLE {table_new}"))
@@ -227,6 +263,17 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                 logger.warning("Parquet directory for 'xbrl_facts' not found. Creating empty new fact tables.")
                 db_conn.execute(SCHEMA["xbrl_facts"].replace("CREATE TABLE IF NOT EXISTS xbrl_facts", "CREATE OR REPLACE TABLE xbrl_facts_new"))
                 db_conn.execute(SCHEMA["xbrl_facts_orphaned"].replace("CREATE TABLE IF NOT EXISTS xbrl_facts_orphaned", "CREATE OR REPLACE TABLE xbrl_facts_orphaned_new"))
+
+            # --- Safety Check: Prevent wiping database if all parquet directories are empty ---
+            empty_count = sum(1 for table in main_tables if not (config.PARQUET_DIR / table).exists() or not any((config.PARQUET_DIR / table).glob('*.parquet')))
+            if empty_count == len(main_tables):
+                logger.critical("SAFETY ABORT: All parquet directories are empty or missing!")
+                logger.critical("This would wipe all EDGAR data from the database.")
+                logger.critical("Please run: python main.py fetch && python main.py parse-to-parquet")
+                logger.critical("Then try loading again.")
+                raise RuntimeError("Refusing to load empty data and wipe database")
+            elif empty_count > 0:
+                logger.warning(f"{empty_count}/{len(main_tables)} parquet directories are empty. Some tables will be replaced with empty data.")
 
             # --- Atomic Swap ---
             logger.info("--- Starting Atomic Table Swap ---")

@@ -531,12 +531,14 @@ if __name__ == "__main__":
 
             final_filepath: Optional[Path] = None
             download_success = False
+            needs_processing = False  # Will be set to True if download succeeds or re-extraction is needed
 
             # --- File Check / Download Logic (Uses logger) ---
             needs_download, status, local_mtime_dt_from_status = _get_file_status(url, local_filepath, headers, logger)
             
-            # Update local_mtime_dt with the value from _get_file_status if available
-            local_mtime_dt_val: Optional[datetime] = local_mtime_dt_from_status
+            # Use the mtime from status check for metadata
+            local_mtime_dt = local_mtime_dt_from_status  # type: ignore[assignment]
+            file_size = 0  # Will be updated when we stat the file
 
             # If the file is up-to-date, check if it was actually extracted.
             # If not, force processing. This handles cases where the zip exists but JSONs were deleted.
@@ -553,6 +555,7 @@ if __name__ == "__main__":
                 if downloaded_path and downloaded_path.is_file():
                     final_filepath = downloaded_path
                     download_success = True
+                    needs_processing = True  # File was downloaded, needs to be processed
                     if status.startswith("Requires Update"):
                         status = "Updated"
                     elif status.startswith("Requires Download"):
@@ -575,7 +578,9 @@ if __name__ == "__main__":
             else: # File is up-to-date, not downloaded
                 final_filepath = local_filepath
                 try:
-                    file_size = final_filepath.stat().st_size
+                    local_stat = final_filepath.stat()
+                    file_size = local_stat.st_size
+                    # local_mtime_dt already set from _get_file_status above
                 except OSError as e:
                     logger.error(f"Could not get stats for existing file {final_filepath}: {e}")
                     status = "Failed Stat"

@@ -45,23 +45,34 @@ def parse_cik_data_worker(cik: str, submissions_dir: Path, companyfacts_dir: Pat
         "cik": cik, "companies": None, "tickers": [], "former_names": [], "filings": [],
         "xbrl_tags": [], "xbrl_facts": [], "company_entity_name": None, "found_any_file": False
     }
-    relevant_accession_numbers: Set[str] = set()
+    accession_numbers_for_filter: Set[str] = set()
 
     if submission_json_path.is_file():
         parsed_data_for_cik["found_any_file"] = True
         parsed_submission = json_parse.parse_submission_json_for_db(submission_json_path)
         if parsed_submission:
             parsed_data_for_cik.update(parsed_submission)
-    
+            # NEW: collect accession numbers from filings for filtering companyfacts
+            accession_numbers_for_filter = set(
+                str(f["accession_number"]) for f in parsed_submission.get("filings", [])
+                if f.get("accession_number")
+            )
+    # else: accession_numbers_for_filter remains empty
+
     if companyfacts_json_path.is_file():
         parsed_data_for_cik["found_any_file"] = True
-        # Pass the set of relevant accession numbers to the facts parser
-        parsed_facts = json_parse.parse_company_facts_json_for_db(companyfacts_json_path)
-        if parsed_facts:
+        parsed_facts = json_parse.parse_company_facts_json_for_db(
+            companyfacts_json_path,
+            relevant_accession_numbers=accession_numbers_for_filter
+        )
+        if isinstance(parsed_facts, dict):
             parsed_data_for_cik["company_entity_name"] = parsed_facts.get("company_entity_name")
-            parsed_data_for_cik["xbrl_tags"].extend(parsed_facts.get("xbrl_tags", []))
-            parsed_data_for_cik["xbrl_facts"].extend(parsed_facts.get("xbrl_facts", []))
-    
+            xbrl_tags = parsed_facts.get("xbrl_tags")
+            if isinstance(xbrl_tags, list):
+                parsed_data_for_cik["xbrl_tags"].extend(xbrl_tags)
+            xbrl_facts = parsed_facts.get("xbrl_facts")
+            if isinstance(xbrl_facts, list):
+                parsed_data_for_cik["xbrl_facts"].extend(xbrl_facts)
     return parsed_data_for_cik if parsed_data_for_cik["found_any_file"] else None
 
 # --- Main Loading Logic ---
@@ -84,6 +95,15 @@ if __name__ == "__main__":
     logger.info(f"--- Starting EDGAR JSON to Parquet Conversion ---")
     config.PARQUET_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"Parquet output directory: {config.PARQUET_DIR}")
+
+    # --- Cleanup obsolete Parquet files before parsing ---
+    from data_processing.parquet_converter_cleanup import clean_obsolete_parquet_files
+    ticker_data = json_parse.load_ticker_data(config.TICKER_FILE_PATH)
+    if not ticker_data:
+        logger.critical("Failed to load ticker data. Exiting.")
+        sys.exit(1)
+    all_ciks = json_parse.extract_formatted_ciks(ticker_data)
+    clean_obsolete_parquet_files(config.PARQUET_DIR, set(all_ciks))
 
     # Load control toggles
     process_limit = config.get_optional_int("PROCESS_LIMIT", default=None)

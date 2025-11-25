@@ -5,7 +5,7 @@ import logging
 import pytest
 
 # Ensure project root is importable when tests run from the repository root
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from utils.config_utils import AppConfig
@@ -29,8 +29,13 @@ def test_parse_submission_json_for_orphan_cik():
     submissions_dir = config.SUBMISSIONS_DIR
     file_path = submissions_dir / f"CIK{ORPHAN_CIK}.json"
 
+    # If the real submission JSON isn't present, fall back to the test fixture
     if not file_path.is_file():
-        pytest.skip(f"Submission JSON not found: {file_path}. Run fetch step to create it.")
+        fixture = PROJECT_ROOT / 'tests' / 'fixtures' / 'submission_sample.json'
+        if fixture.exists():
+            file_path = fixture
+        else:
+            pytest.skip(f"Submission JSON not found and no fixture available: {file_path}")
 
     parsed_data = parse_submission_json_for_db(file_path)
 
