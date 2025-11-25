@@ -64,14 +64,24 @@ SCRIPTS = {
     "parse-to-parquet": SCRIPT_DIR / "data_processing/parse_to_parquet.py",
     "json_to_duckdb": SCRIPT_DIR / "data_processing/json_to_duckdb_refactored.py",
     "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py",
+    "generate_backlog": SCRIPT_DIR / "scripts/generate_prioritized_backlog.py",
+    "stage_fetch_plan": SCRIPT_DIR / "scripts/stage_stock_fetch_plan.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
+    "gather_stocks_polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
+    "gather-stocks-polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
+    "enrich_tickers": SCRIPT_DIR / "data_gathering/ticker_enrichment_massive.py",
+    "enrich-tickers": SCRIPT_DIR / "data_gathering/ticker_enrichment_massive.py",
+    "gather_ticker_info": SCRIPT_DIR / "data_gathering/ticker_info_gatherer_polygon.py",
+    "gather-ticker-info": SCRIPT_DIR / "data_gathering/ticker_info_gatherer_polygon.py",
     "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
-    "load_stocks": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "load_info": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "load_ticker_info": SCRIPT_DIR / "data_processing/load_ticker_info.py",
+    "load-ticker-info": SCRIPT_DIR / "data_processing/load_ticker_info.py",
     "gather_macro": SCRIPT_DIR / "data_gathering/macro_data_gatherer.py",
     "load_macro": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "gather_market_risk": SCRIPT_DIR / "data_gathering/market_risk_gatherer.py",
     "load_market_risk": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
+    "load_stocks": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
     "feature_eng": SCRIPT_DIR / "data_processing/feature_engineering.py",
     "summarize": SCRIPT_DIR / "data_processing/summarize_filings.py",
     "validate": SCRIPT_DIR / "utils/validate_edgar_db.py",
@@ -128,22 +138,64 @@ def run_script(script_key: str, script_args: Optional[List[str]] = None, timeout
         logger.error(f"---===[ Step '{script_key.upper()}' FAILED with exit code {process.exitcode} in {end_time - start_time:.2f}s ]===---")
         return False
 
+def list_steps():
+    """Display all available pipeline steps."""
+    print("\n📋 Available Pipeline Steps:\n")
+    print("Core Pipeline:")
+    print("  core                   - Run essential EDGAR (fetch → parse → load → validate)")
+    print("  all                    - Run the complete pipeline")
+    print("  fetch                  - Fetch EDGAR archives")
+    print("  parse-to-parquet       - Parse JSON to Parquet format")
+    print("  load                   - Load Parquet data into DuckDB")
+    print("  summarize              - Summarize filings")
+    print("  validate               - Validate database integrity")
+    print("  cleanup                - Clean up temporary artifacts")
+    print("  feature_eng            - Run feature engineering")
+    print("\nPolygon/Massive Stock Data:")
+    print("  generate_backlog       - Generate prioritized ticker backlog")
+    print("  gather-stocks-polygon  - Gather stock price data from Polygon")
+    print("  gather-ticker-info     - Gather ticker reference data from Polygon")
+    print("  load-ticker-info       - Load ticker info into database")
+    print("  enrich-tickers         - Enrich ticker metadata")
+    print("\nYFinance Data (Legacy):")
+    print("  gather_info            - Gather stock info from YFinance")
+    print("  load_info              - Load YFinance info into database")
+    print("  load_stocks            - Load stock history into database")
+    print("\nMacro & Market Data:")
+    print("  gather_macro           - Gather macro economic data (FRED)")
+    print("  load_macro             - Load macro data into database")
+    print("  gather_market_risk     - Gather market risk factors")
+    print("  load_market_risk       - Load market risk data into database")
+    print("\nUtilities:")
+    print("  inspect                - Scan downloads directory")
+    print("  investigate_orphans    - Find orphaned records")
+    print()
+
 def main():
     """Parses command-line arguments and runs the requested pipeline steps."""
     parser = argparse.ArgumentParser(description="Orchestrator for the EDGAR Data Pipeline.")
     parser.add_argument(
         "step",
         nargs="?",
+
         default="all",
         choices=[
-            "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
+            "core", "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_info", "load_info", "gather_macro", "load_macro",
-            "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect"
+            "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect",
+            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks", "generate_backlog",
+            "enrich_tickers", "enrich-tickers", "gather_ticker_info", "gather-ticker-info",
+            "load_ticker_info", "load-ticker-info", "list-steps"
         ],
-        help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'."
+        help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'. Use 'list-steps' to see all available steps."
     )
 
     args, remaining_args = parser.parse_known_args()
+
+    # Handle list-steps command
+    if args.step == "list-steps":
+        list_steps()
+        sys.exit(0)
 
     # Load config to log paths, though individual scripts will load it too.
     try:
@@ -152,6 +204,51 @@ def main():
     except SystemExit:
         logger.critical("Configuration failed. Check .env file. Exiting orchestrator.")
         sys.exit(1)
+
+    if args.step == "core":
+        core_steps = [
+            ("fetch", None, None),
+            ("parse-to-parquet", None, None),
+            ("load", None, None),
+            ("validate", None, None),
+        ]
+        logger.info("Running core pipeline...")
+        for step_name, script_args, timeout in core_steps:
+            if not run_script(step_name, script_args=script_args, timeout=timeout):
+                logger.error(f"Core pipeline stopped due to failure in step: '{step_name}'.")
+                sys.exit(1)
+        logger.info("Core pipeline completed successfully!")
+        sys.exit(0)
+
+    args, remaining_args = parser.parse_known_args()
+
+    # Handle list-steps command
+    if args.step == "list-steps":
+        list_steps()
+        sys.exit(0)
+
+    # Load config to log paths, though individual scripts will load it too.
+    try:
+        config = AppConfig(calling_script_path=Path(__file__))
+        logger.info(f"Orchestrator configured. DB target: {config.DB_FILE_STR}")
+    except SystemExit:
+        logger.critical("Configuration failed. Check .env file. Exiting orchestrator.")
+        sys.exit(1)
+
+    if args.step == "core":
+        core_steps = [
+            ("fetch", None, None),
+            ("parse-to-parquet", None, None),
+            ("load", None, None),
+            ("validate", None, None),
+        ]
+        logger.info("Running core pipeline...")
+        for step_name, script_args, timeout in core_steps:
+            if not run_script(step_name, script_args=script_args, timeout=timeout):
+                logger.error(f"Core pipeline stopped due to failure in step: '{step_name}'.")
+                sys.exit(1)
+        logger.info("Core pipeline completed successfully!")
+        sys.exit(0)
 
     if args.step == "all":
         # Run cleanup at the end to free up space
@@ -186,6 +283,8 @@ def main():
             final_args = ["yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"] + remaining_args
         elif script_key == "load_market_risk":
             final_args = ["market_risk_factors"] + remaining_args
+        elif script_key == "load_stocks":
+            final_args = ["stock_history"] + remaining_args
 
         if not run_script(script_key, script_args=final_args):
             sys.exit(1)

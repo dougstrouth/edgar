@@ -11,7 +11,8 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
 *   **Atomic Database Updates**: The data loading process uses a "blue-green" deployment strategy. Data is loaded into temporary tables, and only upon successful completion are the live tables atomically swapped. This ensures the database is never left in a corrupted or incomplete state, even if a load fails midway.
 *   **Data Ordering for Performance**: During the database load, the largest tables (`xbrl_facts` and `filings`) are pre-sorted on commonly queried columns (like `cik`, `form`, and `filing_date`). This significantly improves query performance by making DuckDB's automatic zonemap indexes more effective.
 *   **Supplementary Data Integration**:
-    *   **Yahoo Finance**: Fetches historical stock prices (OHLCV), company profile information, financial statements, and corporate actions.
+    *   **Massive.com (formerly Polygon.io) – Stocks**: Fetches historical stock prices (OHLCV) with a generous free tier (5 calls/minute, 1-day delay). Backfills years of daily data reliably.
+    *   **Yahoo Finance**: Fetches company profile information, financial statements, and corporate actions.
     *   **Federal Reserve (FRED)**: Gathers key macroeconomic time-series data (e.g., GDP, CPI, interest rates) to provide economic context for financial models.
 *   **Resilient API Interaction**:
     *   **Intelligent Retries**: Implements exponential backoff with jitter for handling API rate limits from external sources like Yahoo Finance.
@@ -56,13 +57,16 @@ This project provides a robust, end-to-end data engineering pipeline for downloa
     *   `DB_FILE`: The absolute path for the DuckDB database file (e.g., `C:\path\to\data\edgar_analytics.duckdb`).
     *   `SEC_USER_AGENT`: A descriptive User-Agent for making requests to the SEC (e.g., `YourName YourOrg your.email@example.com`). **This is required by the SEC.**
     *   `FRED_API_KEY`: Your API key for the FRED service (optional, if using `gather-macro`).
+    *   `POLYGON_API_KEY`: Your API key from Massive.com (formerly Polygon.io) - free tier works.
+    *   `POLYGON_MAX_WORKERS` (optional): Parallel workers for Massive/Polygon gatherers. For free tier, keep at `1`.
+    *   `POLYGON_CALLS_PER_MINUTE` (optional): Effective client-side cap for Massive API calls per minute (default: 3; max: 5 on free tier). The client also spaces calls by ~20s to avoid burst 429s.
 
 ## Project Structure
 
 The project is organized into the following directories:
 
 *   `main.py`: The main orchestrator for running pipeline steps.
-*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Yahoo Finance, FRED).
+*   `data_gathering/`: Scripts for fetching data from external sources (SEC, Massive.com, Yahoo Finance, FRED).
 *   `data_processing/`: Scripts for parsing, cleaning, and loading data into the database.
 *   `analysis/`: Scripts and notebooks for analyzing the data.
 *   `utils/`: Utility scripts for configuration, logging, and database connections.
@@ -113,6 +117,36 @@ python main.py load_macro
 # Gather market risk factors
 python main.py gather_market_risk
 python main.py load_market_risk
+
+# Step 3: Gather supplementary stock data
+# Gather daily OHLCV from Massive.com (formerly Polygon.io) - recommended for prices
+# Start small to test (limit=50 means 50 tickers)
+python data_gathering/stock_data_gatherer_polygon.py --mode initial_load --limit 50
+
+# Option B: orchestrator alias
+python main.py gather-stocks-polygon -- --mode initial_load --limit 50
+
+# Load the gathered prices into DuckDB
+python data_processing/load_supplementary_data.py stock_history
+```
+
+### Stocks: Loader and De-duplication
+The `stock_history` table uses incremental upserts with a composite primary key on `(ticker, date)`. This ensures no duplicates and that re-runs replace existing rows for the same day:
+
+- Table schema constraint: `PRIMARY KEY (ticker, date)`
+- Merge behavior: `INSERT OR REPLACE` from a batch staging table
+- De-duplication is automatic at the database level
+
+Quick duplicate check (expects `duckdb` installed):
+```bash
+python - <<'PY'
+import duckdb
+con = duckdb.connect('/absolute/path/to/edgar_analytics.duckdb', read_only=True)
+total = con.execute('SELECT COUNT(*) FROM stock_history').fetchone()[0]
+unique = con.execute('SELECT COUNT(DISTINCT (ticker, date)) FROM stock_history').fetchone()[0]
+print('Total:', total, 'Unique:', unique, 'Duplicates:', total-unique)
+con.close()
+PY
 ```
 
 **Other Commands:**
@@ -130,6 +164,44 @@ python main.py cleanup --all
 ## Database Schema
 
 For a detailed description of all database tables, columns, and their relationships, please see the [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
+
+## Massive.com Quick Check
+
+Validate connectivity and estimate capacity:
+
+```bash
+python tests/test_polygon_capacity.py
+```
+This checks your `POLYGON_API_KEY`, fetches sample tickers, and estimates effective calls/min under rate limits.
+
+### Massive.com Client & Rate Limiting
+The built-in client targets `https://api.massive.com` (Polygon rebrand) and applies conservative rate limiting suitable for the free tier:
+
+- Default cap is `POLYGON_CALLS_PER_MINUTE=3` with ~20s spacing between requests to avoid burst 429s; you can raise to 4–5 if stable.
+- 404 responses (unknown tickers) still count against your quota; failed requests are tracked to avoid repeated waste.
+- Tickers with dashes are normalized to dot notation (e.g., `AAM-UN` → `AAM.UN`).
+
+Environment knobs:
+- `POLYGON_MAX_WORKERS=1` (recommended for free tier)
+- `POLYGON_CALLS_PER_MINUTE=3` (safe default; max 5 on free tier)
+- `POLYGON_BATCH_SIZE=100` (optional; unified batch size for both Massive/Polygon gatherers. Controls how many rows are buffered before writing a parquet batch. Larger values reduce small-file churn; smaller values surface data sooner.)
+
+Batching & Load Simplification:
+- The stock price gatherer no longer performs periodic or automatic final database loads. It only writes parquet batches. Run `python update_from_parquet.py` (or the dedicated load scripts) when you want to ingest newly written parquet files.
+- This decoupling improves reliability (DB load happens in an explicit, restartable step) and reduces contention with long-running gathers.
+
+Migration Note:
+- Deprecated variables removed: `POLYGON_STOCK_BATCH_SIZE`, `POLYGON_STOCK_DB_WRITE_INTERVAL_SECONDS`, `POLYGON_INFO_BATCH_SIZE`.
+- Replace any prior references with the single `POLYGON_BATCH_SIZE` variable. Leaving old vars in `.env` has no effect.
+
+## VS Code Debugging
+
+Launch profiles are included in `.vscode/launch.json`. Ensure your `.env` is present at the workspace root; VS Code will honor it via the project's config loader. Useful entries:
+ - `MAIN: Run 'all' pipeline`
+ - `STEP: fetch`, `parse-to-parquet`, `load`, `validate`
+ - `STEP: gather-stocks-polygon (initial 50)` to exercise Polygon gathering
+
+If you add new steps, consider updating `main.py` choices and `.vscode/launch.json` to keep them aligned.
 
 ## Incremental Parquet Loader
 
@@ -149,6 +221,81 @@ python update_from_parquet.py
 # Apply without creating a checkpoint (use with caution)
 python update_from_parquet.py --no-checkpoint
 ```
+
+## Supplementary Loading Methodology
+
+Supplementary (non-core EDGAR) datasets are loaded using two distinct strategies, chosen per table based on data evolution patterns and risk tolerance for historical replacement:
+
+**Snapshot (Blue-Green Atomic Swap)**
+- Tables whose entire historical dataset is regenerated each gather run (e.g. macroeconomic time series, market risk factors) are loaded through a staging table (`<table>_new`).
+- Data is bulk inserted into the staging table; uniqueness is enforced via PRIMARY KEYs and supporting indexes.
+- After successful staging, an atomic swap (`DROP TABLE` + `ALTER TABLE RENAME`) replaces the live table. Failed swaps roll back cleanly.
+- Guarantees: no partial updates; consistent point-in-time view.
+
+**Incremental (Drip-Feed Upsert)**
+- Tables that accumulate new events (e.g. `stock_history`, `stock_fetch_errors`, `yf_stock_actions`, `yf_recommendations`, `yf_info_fetch_errors`) ingest only new batches.
+- A batch staging table (`<table>_batch`) is populated from all matching parquet files, then merged using `INSERT OR REPLACE` into the base table (PRIMARY KEY required).
+- Old rows remain unless a batch includes an updated value for the same key.
+- Guarantees: append-or-update semantics without full historical reload.
+
+The authoritative classification and deeper rationale (including future enhancement notes) is documented in [`SUPPLEMENTARY_LOADING_METHOD.md`](SUPPLEMENTARY_LOADING_METHOD.md).
+
+### DuckDB Primary Key Enforcement for Incremental Tables
+Some legacy databases created before PKs were added may lack the required primary key on `stock_history`. The loader now auto-detects this scenario and performs a safe in-place migration:
+
+1. Back up existing rows to a temporary table
+2. Drop and recreate the base table with the proper `PRIMARY KEY`
+3. Restore the data, then proceed with `INSERT OR REPLACE` upserts
+
+If you encountered this error previously:
+
+```
+Binder Error: There are no UNIQUE/PRIMARY KEY Indexes that refer to this table, ON CONFLICT is a no-op
+```
+
+Re-run the loader and it will auto-correct the schema before the merge.
+
+### Ticker Info Loader (Polygon / Massive)
+`updated_ticker_info` uses both modes:
+- Default execution performs an incremental upsert (existing ticker rows are updated in-place).
+- Pass `--full-refresh` to perform a blue-green replacement (use after large schema or source changes).
+
+Usage examples:
+```bash
+# Incremental (default)
+python data_processing/load_ticker_info.py
+
+# Full refresh atomic swap
+python data_processing/load_ticker_info.py --full-refresh
+```
+
+### Massive Ticker Enrichment Parquet Backups
+`ticker_enrichment_massive.py` writes a timestamped parquet backup for every enrichment batch under `PARQUET_DIR/massive_tickers/` (e.g. `massive_tickers_batch_20240131_235959.parquet`). These files:
+- Provide an audit trail of enrichment inputs.
+- Allow reconstruction or replays if the database must be restored.
+- Are safe to prune by age once downstream validation is complete.
+
+### Operational Safety Notes
+- All snapshot tables have PRIMARY KEY constraints enabling deterministic `INSERT OR REPLACE` usage during staging (even if duplicates arise in inputs).
+- Incremental tables avoid `DROP` operations—reduces accidental data loss risk during partial runs.
+- **Swap Guards**: Blue-green snapshot loaders abort atomic swap operations when staging row count is less than existing table, preventing accidental data reduction or loss. Ticker info loader additionally validates distinct ticker count to prevent universe contraction.
+- Empty staging detection: loaders refuse to swap when staging is empty but existing table contains data (logged as error with retention of original).
+- Backups: parquet artifacts themselves are the provenance layer; consider offloading older batches to cold storage for long-term retention.
+
+### Adding New Supplementary Tables
+1. Define a schema with an appropriate PRIMARY KEY in `load_supplementary_data.py`.
+2. Decide classification: snapshot vs incremental (see methodology doc).
+3. Emit parquet via a gatherer script using deterministic column ordering.
+4. Load with either incremental merge or blue-green swap; update documentation and tests accordingly.
+5. Add validation queries (distribution checks, row counts) where appropriate.
+
+### Quick Reference
+| Strategy | When to Use | Mechanism | Risk Mitigated |
+|----------|-------------|-----------|----------------|
+| Blue-Green Swap | Regenerated full datasets | Staging + atomic rename | Partial/corrupted historical reloads |
+| Incremental Upsert | Event-based growth | Batch staging + upsert | Unnecessary full reload & data churn |
+
+For full details, including planned enhancements (audit table, empty-swap guards, batch lineage), see [`SUPPLEMENTARY_LOADING_METHOD.md`](SUPPLEMENTARY_LOADING_METHOD.md).
 
 ## Testing
 

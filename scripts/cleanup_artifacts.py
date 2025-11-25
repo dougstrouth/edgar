@@ -81,7 +81,15 @@ def main():
         remove_directory(config.EXTRACT_BASE_DIR, logger)
 
     if args.parquet or args.all:
-        remove_directory(config.PARQUET_DIR, logger)
+        # Remove EDGAR parquet subdirectories but preserve supplementary data like stock_history
+        edgar_parquet_dirs = ['companies', 'tickers', 'former_names', 'filings', 'xbrl_facts', 'xbrl_tags', 'filing_summaries']
+        for subdir in edgar_parquet_dirs:
+            parquet_subdir = config.PARQUET_DIR / subdir
+            if parquet_subdir.exists():
+                remove_directory(parquet_subdir, logger)
+            else:
+                logger.debug(f"Parquet subdirectory not found, skipping: {parquet_subdir}")
+        logger.info("Note: Preserved supplementary parquet data (stock_history, etc.) for incremental updates")
 
     if args.cache:
         # Remove the new centralized cache and any old lingering ones

@@ -51,6 +51,13 @@ ECONOMIC_TABLES = ["macro_economic_data", "market_risk_factors"]
 
 ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + YF_INFO_TABLES + ECONOMIC_TABLES
 
+# Additional supplementary tables used by gatherers/status tracking
+SUPPLEMENTARY_OPTIONAL = [
+    'yf_untrackable_tickers',
+    'yf_fetch_status'
+]
+
+
 # --- Validation Helper Function ---
 def run_validation_query(con: duckdb.DuckDBPyConnection, query: str, description: str, logger: logging.Logger, expect_zero: bool = False, warning_threshold: Optional[int] = None) -> Tuple[Optional[str], Optional[int], str]:
     """Runs a validation query, logs the result, and optionally flags non-zero counts."""
@@ -198,12 +205,21 @@ def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Log
         "stock_history", # From stock_data_gatherer
         "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations"
     ]
+
+    # Build a unified ticker source that includes authoritative EDGAR tickers
+    # and, if available, enriched tickers from the Massive/Polygon reference table.
+    ticker_source_sql = "(SELECT DISTINCT ticker FROM tickers)"
+    if 'massive_tickers' in db_tables:
+        ticker_source_sql = (
+            "(SELECT DISTINCT ticker FROM tickers "
+            "UNION SELECT DISTINCT ticker FROM massive_tickers)"
+        )
     for table in yf_tables_with_ticker:
         if table.lower() in db_tables:
             query = f"""
                 SELECT COUNT(t1.ticker) as count
                 FROM {table} t1
-                LEFT JOIN tickers t2 ON t1.ticker = t2.ticker
+                LEFT JOIN {ticker_source_sql} t2 ON t1.ticker = t2.ticker
                 WHERE t2.ticker IS NULL;
             """
             results.append(run_validation_query(con, query, f"Ticker Consistency Check: {table} -> tickers", logger, expect_zero=True))
@@ -237,6 +253,40 @@ def check_market_risk_validations(con: duckdb.DuckDBPyConnection, logger: loggin
     
     return results
 
+
+def check_stock_history_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
+    """Run validations specific to `stock_history` table."""
+    results = []
+    logger.info("\n=== Checking Stock History Data Integrity ===")
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+    table_name = 'stock_history'
+
+    if table_name in db_tables:
+        # NULL PKs
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE ticker IS NULL OR date IS NULL;", f"{table_name}: NULL PK Check", logger, expect_zero=True))
+
+        # Negative or impossible volumes
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE volume < 0;", f"{table_name}: Negative volume values", logger, expect_zero=True))
+
+        # Check for missing price columns when volume exists
+        results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table_name} WHERE (open IS NULL AND close IS NULL AND adj_close IS NULL) AND volume IS NOT NULL;", f"{table_name}: Rows with volume but no price data", logger, warning_threshold=1))
+
+        # Recent continuity check (optional): ensure last 7 calendar days have at most N missing tickers
+        try:
+            import datetime as _dt
+            end_dt = _dt.date.today()
+            start_dt = end_dt - _dt.timedelta(days=7)
+            # Count number of distinct (ticker,date) missing in the window compared to tickers list
+            # Build a small query that reports if any ticker has zero rows in the window
+            query = f"SELECT COUNT(*) as count FROM (SELECT t.ticker FROM tickers t LEFT JOIN (SELECT DISTINCT ticker FROM {table_name} WHERE date BETWEEN '{start_dt}' AND '{end_dt}') s ON t.ticker = s.ticker WHERE s.ticker IS NULL);"
+            results.append(run_validation_query(con, query, f"{table_name}: Tickers missing recent data (last 7 days)", logger, warning_threshold=100))
+        except Exception:
+            # Do not fail validation if date arithmetic isn't supported in the DB environment
+            logger.debug("Skipping recent continuity check due to date arithmetic error.")
+
+    return results
+
+
 def check_error_tables(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Checks for the presence of errors in the fetch error tables."""
     results = []
@@ -248,6 +298,20 @@ def check_error_tables(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -
         if table.lower() in db_tables:
             results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table};", f"Error Count Check: {table}", logger, warning_threshold=0))
     return results
+
+
+def check_supplementary_presence(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
+    """Report presence/absence of optional supplementary tables used by various gatherers."""
+    results = []
+    logger.info("\n=== Checking Supplementary Table Presence ===")
+    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+    for table in SUPPLEMENTARY_OPTIONAL:
+        if table.lower() not in db_tables:
+            logger.warning(f"Supplementary table '{table}' not found. This is optional but may indicate missing data pipelines.")
+        else:
+            results.append(run_validation_query(con, f"SELECT COUNT(*) as count FROM {table};", f"Supplementary presence: {table}", logger))
+    return results
+
 
 def check_macro_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
     """Runs various checks on the macroeconomic data."""
@@ -285,6 +349,9 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
     all_results.extend(check_error_tables(con, logger))
     all_results.extend(check_macro_data_validations(con, logger))
+    # New checks for supplementary presence and stock history integrity
+    all_results.extend(check_supplementary_presence(con, logger))
+    all_results.extend(check_stock_history_validations(con, logger))
 
     # --- Summarize Results ---
     logger.info("\n=== Validation Summary ===")
