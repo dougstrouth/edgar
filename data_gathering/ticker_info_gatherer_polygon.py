@@ -44,6 +44,7 @@ from utils.logging_utils import setup_logging  # noqa: E402
 from utils.database_conn import ManagedDatabaseConnection  # noqa: E402
 from utils.polygon_client import PolygonClient, PolygonRateLimiter  # noqa: E402
 from utils.prioritizer import prioritize_tickers_for_stock_data  # noqa: E402
+from utils.untrackable import mark_untrackable, get_untrackable_tickers  # noqa: E402
 
 # Setup logging
 SCRIPT_NAME = Path(__file__).stem
@@ -154,29 +155,8 @@ def get_existing_ticker_info(
 
 
 def get_polygon_untrackable_tickers(con: duckdb.DuckDBPyConnection, expiry_days: int = 365) -> Set[str]:
-    """
-    Gets a set of tickers that have been marked as untrackable from Polygon API within the expiry period.
-    Tickers marked untrackable longer ago than `expiry_days` will be retried.
-    
-    Common reasons for untrackable:
-    - 404 Not Found (ticker doesn't exist in Polygon's database)
-    - Delisted or invalid tickers
-    """
-    logger.info(f"Querying for Polygon untrackable tickers (expiry: {expiry_days} days) to exclude...")
-    untrackable_set: Set[str] = set()
-    try:
-        # Check if table exists first
-        tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
-        if "polygon_untrackable_tickers" in tables:
-            query = f"SELECT ticker FROM polygon_untrackable_tickers WHERE last_failed_timestamp >= (now() - INTERVAL '{expiry_days} days');"
-            results = con.execute(query).fetchall()
-            untrackable_set = {row[0] for row in results}
-            logger.info(f"Found {len(untrackable_set)} Polygon untrackable tickers to skip")
-        else:
-            logger.info("polygon_untrackable_tickers table doesn't exist yet")
-    except Exception as e:
-        logger.warning(f"Could not query polygon_untrackable_tickers: {e}")
-    return untrackable_set
+    """Backward-compatible wrapper using shared utility (deprecated name)."""
+    return get_untrackable_tickers(con, expiry_days=expiry_days)
 
 
 def fetch_worker(job: Dict[str, Any], client: Optional[PolygonClient] = None) -> Dict[str, Any]:
@@ -302,18 +282,7 @@ def fetch_worker(job: Dict[str, Any], client: Optional[PolygonClient] = None) ->
             try:
                 with ManagedDatabaseConnection(db_path_override=db_path, read_only=False) as conn:
                     if conn:
-                        conn.execute("""
-                            CREATE TABLE IF NOT EXISTS polygon_untrackable_tickers (
-                                ticker VARCHAR NOT NULL COLLATE NOCASE PRIMARY KEY,
-                                reason VARCHAR,
-                                last_failed_timestamp TIMESTAMPTZ
-                            );
-                        """)
-                        conn.execute(
-                            "INSERT OR REPLACE INTO polygon_untrackable_tickers VALUES (?, ?, ?);",
-                            [ticker, error_msg, datetime.now(timezone.utc)]
-                        )
-                        logger.info(f"🚫 Marked {ticker} as Polygon-untrackable (client error) in database")
+                            mark_untrackable(conn, ticker, error_msg)
             except Exception as db_e:
                 logger.error(f"Failed to mark {ticker} as untrackable: {db_e}")
         
@@ -420,11 +389,14 @@ def run_polygon_ticker_info_pipeline(
 
         # Get untrackable tickers (404s, etc.) to skip
         untrackable_tickers = get_polygon_untrackable_tickers(con, expiry_days=365)
+        before_untrackable_filter = len(tickers_to_fetch)
         tickers_to_fetch = [t for t in tickers_to_fetch if t not in untrackable_tickers]
-        skipped_untrackable = len(all_tickers) - len(tickers_to_fetch) - skipped
-        
+        skipped_untrackable = before_untrackable_filter - len(tickers_to_fetch)
+
         if skipped_untrackable > 0:
             logger.info(f"Skipping {skipped_untrackable} previously failed (untrackable) tickers")
+        elif before_untrackable_filter and not untrackable_tickers:
+            logger.info("No untrackable tickers to skip (table empty or absent)")
         
         logger.info(f"Will fetch info for {len(tickers_to_fetch)} tickers (prioritize={prioritize})")
     

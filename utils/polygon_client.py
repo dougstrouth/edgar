@@ -327,8 +327,9 @@ class PolygonClient:
             data = self._make_request(endpoint)
             return data.get('results')
         except requests.exceptions.RequestException as e:
+            # Re-raise so upstream fetch_worker can classify permanent 4xx errors and mark untrackable.
             logger.error(f"Failed to fetch details for {ticker}: {e}")
-            return None
+            raise
     
     def get_all_tickers(
         self, 

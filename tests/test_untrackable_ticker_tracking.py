@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from data_gathering.ticker_info_gatherer_polygon import get_polygon_untrackable_tickers  # noqa: E402
+from data_gathering.ticker_info_gatherer_polygon import fetch_worker as fetch_worker_info  # noqa: E402
 from data_gathering.stock_data_gatherer_polygon import get_polygon_untrackable_tickers as get_polygon_untrackable_tickers_stock  # noqa: E402
 from scripts.generate_prioritized_backlog import build_query, DEFAULT_WEIGHTS  # noqa: E402
 
@@ -256,6 +257,77 @@ class TestPrioritizationExclusion:
         tickers = {row[0] for row in result}
         assert 'GOOD' in tickers
         assert 'BAD' in tickers
+
+
+class TestTickerInfoErrorTracking:
+    """Tests specific to ticker info gatherer error -> untrackable table creation."""
+
+    def test_ticker_info_404_marks_untrackable(self, test_db, monkeypatch):
+        """Simulate 404 in get_ticker_details and verify table creation + insertion."""
+        con, db_path = test_db
+
+        # Mock PolygonClient inside fetch_worker to raise a 404 error
+        import requests
+
+        class MockClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_ticker_details(self, ticker):
+                error = requests.HTTPError("404 Client Error: Not Found")
+                error.response = type('obj', (), {'status_code': 404})()
+                raise error
+
+        monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.PolygonClient', MockClient)
+
+        job = {
+            'ticker': 'MISSING1',
+            'api_key': 'DUMMY',
+            'db_path': str(db_path),
+            'calls_per_minute': 3
+        }
+
+        result = fetch_worker_info(job)
+        assert result['status'] == 'error'
+        assert result['ticker'] == 'MISSING1'
+        assert result.get('is_permanent') is True
+
+        # Verify table created and ticker inserted
+        tables = {r[0].lower() for r in con.execute('SHOW TABLES').fetchall()}
+        assert 'polygon_untrackable_tickers' in tables
+        rows = con.execute("SELECT ticker, reason FROM polygon_untrackable_tickers WHERE ticker = 'MISSING1'").fetchall()
+        assert rows and '404' in rows[0][1]
+
+    def test_ticker_info_400_marks_untrackable(self, test_db, monkeypatch):
+        """Simulate 400 error and verify tracking."""
+        con, db_path = test_db
+        import requests
+
+        class MockClient400:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_ticker_details(self, ticker):
+                error = requests.HTTPError("400 Client Error: Bad Request")
+                error.response = type('obj', (), {'status_code': 400})()
+                raise error
+
+        monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.PolygonClient', MockClient400)
+
+        job = {
+            'ticker': 'BADREQ1',
+            'api_key': 'DUMMY',
+            'db_path': str(db_path),
+            'calls_per_minute': 3
+        }
+
+        result = fetch_worker_info(job)
+        assert result['status'] == 'error'
+        assert result['ticker'] == 'BADREQ1'
+        assert result.get('is_permanent') is True
+
+        rows = con.execute("SELECT ticker FROM polygon_untrackable_tickers WHERE ticker = 'BADREQ1'").fetchall()
+        assert rows
     
     def test_query_with_untrackable_table_excludes_bad_tickers(self, test_db):
         """Test that query excludes tickers in polygon_untrackable_tickers."""

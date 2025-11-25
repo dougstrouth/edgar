@@ -210,6 +210,75 @@ class TestStockAggsUntrackableTracking:
         # Ticker should be in untrackable table
         untrackable = get_polygon_untrackable_tickers(con, expiry_days=365)
         assert 'BADREQUEST' in untrackable
+    
+    def test_verify_404_tracking_details(self, test_db, monkeypatch, capsys):
+        """Comprehensive test to verify 404 tracking with detailed output."""
+        con, db_path = test_db
+        
+        # Mock PolygonClient to raise 404
+        class Mock404Client:
+            def __init__(self, *args, **kwargs):
+                pass
+            
+            def get_aggregates(self, ticker, start_date, end_date):
+                from requests import HTTPError
+                error = HTTPError("404 Client Error: Not Found")
+                error.response = MagicMock(status_code=404)
+                raise error
+        
+        monkeypatch.setattr('data_gathering.stock_data_gatherer_polygon.PolygonClient', Mock404Client)
+        
+        # Process multiple tickers with 404s
+        tickers_to_test = ['FAKE1', 'FAKE2', 'FAKE3']
+        
+        for ticker in tickers_to_test:
+            job = {
+                'ticker': ticker,
+                'start_date': date(2024, 1, 1),
+                'end_date': date(2024, 1, 2),
+                'api_key': 'test_key',
+                'db_path': str(db_path)
+            }
+            
+            result = fetch_worker(job)
+            assert result['status'] == 'error', f"{ticker} should have error status"
+        
+        # Verify all were tracked
+        print("\n=== Verification of 404 Tracking ===")
+        
+        # Check table exists
+        tables = con.execute("SHOW TABLES;").fetchall()
+        table_names = [t[0] for t in tables]
+        print(f"Tables in database: {table_names}")
+        assert 'polygon_untrackable_tickers' in table_names, "Table should be created"
+        
+        # Get all records
+        all_records = con.execute("""
+            SELECT ticker, reason, last_failed_timestamp 
+            FROM polygon_untrackable_tickers 
+            ORDER BY ticker;
+        """).fetchall()
+        
+        print(f"\nTotal untrackable tickers recorded: {len(all_records)}")
+        print("\nDetailed records:")
+        for ticker, reason, timestamp in all_records:
+            print(f"  Ticker: {ticker}")
+            print(f"    Reason: {reason}")
+            print(f"    Timestamp: {timestamp}")
+            print()
+        
+        # Verify all test tickers are present
+        tracked_tickers = {record[0] for record in all_records}
+        for ticker in tickers_to_test:
+            assert ticker in tracked_tickers, f"{ticker} should be tracked"
+        
+        # Verify using get_polygon_untrackable_tickers function
+        untrackable_set = get_polygon_untrackable_tickers(con, expiry_days=365)
+        print(f"Untrackable set (via function): {sorted(untrackable_set)}")
+        
+        assert untrackable_set == set(tickers_to_test), "Function should return all test tickers"
+        
+        print("\n✅ All 404s were properly tracked in polygon_untrackable_tickers table")
 
 
 if __name__ == '__main__':

@@ -48,6 +48,7 @@ from utils.logging_utils import setup_logging
 from utils.database_conn import ManagedDatabaseConnection
 from utils.polygon_client import PolygonClient, PolygonRateLimiter
 from utils.prioritizer import prioritize_tickers_for_stock_data
+from utils.untrackable import mark_untrackable, get_untrackable_tickers
 
 # Setup logging
 SCRIPT_NAME = Path(__file__).stem
@@ -59,32 +60,12 @@ DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
 BATCH_SIZE = 100  # Number of records before writing to parquet
 LOOKBACK_YEARS = 5  # Default historical data period
 DEFAULT_MAX_RUNTIME_HOURS = 15  # Default max runtime (increased for rate limiting)
+DEFAULT_CALLS_PER_MINUTE = 3  # Align with ticker info gatherer (can raise to 5 safely)
 
 
 def get_polygon_untrackable_tickers(con: duckdb.DuckDBPyConnection, expiry_days: int = 365) -> Set[str]:
-    """
-    Gets a set of tickers that have been marked as untrackable from Polygon API within the expiry period.
-    Tickers marked untrackable longer ago than `expiry_days` will be retried.
-    
-    Common reasons for untrackable:
-    - 404 Not Found (ticker doesn't exist in Polygon's database)
-    - Delisted or invalid tickers
-    """
-    logger.info(f"Querying for Polygon untrackable tickers (expiry: {expiry_days} days) to exclude...")
-    untrackable_set: Set[str] = set()
-    try:
-        # Check if table exists first
-        tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
-        if "polygon_untrackable_tickers" in tables:
-            query = f"SELECT ticker FROM polygon_untrackable_tickers WHERE last_failed_timestamp >= (now() - INTERVAL '{expiry_days} days');"
-            results = con.execute(query).fetchall()
-            untrackable_set = {row[0] for row in results}
-            logger.info(f"Found {len(untrackable_set)} Polygon untrackable tickers to skip")
-        else:
-            logger.info("polygon_untrackable_tickers table doesn't exist yet")
-    except Exception as e:
-        logger.warning(f"Could not query polygon_untrackable_tickers: {e}")
-    return untrackable_set
+    """Backward-compatible wrapper using shared utility (deprecated name)."""
+    return get_untrackable_tickers(con, expiry_days=expiry_days)
 
 
 # Helper for clamping overly large historical intervals when using a plan table
@@ -315,9 +296,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     db_path = job.get('db_path')  # For marking untrackable tickers
     
     # Create client in this process (can't share across processes)
-    # Use ultra-conservative rate limit: 2 calls/min (even 404s count against limit!)
-    rate_limiter = PolygonRateLimiter(calls_per_minute=2)
-    client = PolygonClient(api_key, rate_limiter=rate_limiter, max_retries=3, retry_delay=10.0)
+    # Use configurable rate limit (defaults to conservative 3 calls/min; free tier allows up to 5)
+    calls_per_minute = job.get('calls_per_minute', DEFAULT_CALLS_PER_MINUTE)
+    rate_limiter = PolygonRateLimiter(calls_per_minute=calls_per_minute)
+    client = PolygonClient(api_key, rate_limiter=rate_limiter)  # use default retry profile to match info gatherer
     
     try:
         # Fetch aggregates
@@ -378,22 +360,10 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         )
         
         if is_permanent_error and db_path:
-            # Mark ticker as untrackable in database to avoid wasting future API calls
             try:
                 with ManagedDatabaseConnection(db_path_override=db_path, read_only=False) as conn:
                     if conn:
-                        conn.execute("""
-                            CREATE TABLE IF NOT EXISTS polygon_untrackable_tickers (
-                                ticker VARCHAR NOT NULL COLLATE NOCASE PRIMARY KEY,
-                                reason VARCHAR,
-                                last_failed_timestamp TIMESTAMPTZ
-                            );
-                        """)
-                        conn.execute(
-                            "INSERT OR REPLACE INTO polygon_untrackable_tickers VALUES (?, ?, ?);",
-                            [ticker, error_msg, datetime.now(timezone.utc)]
-                        )
-                        logger.info(f"🚫 Marked {ticker} as Polygon-untrackable (client error) in database")
+                        mark_untrackable(conn, ticker, error_msg)
             except Exception as db_e:
                 logger.error(f"Failed to mark {ticker} as untrackable: {db_e}")
         
@@ -438,9 +408,11 @@ def run_polygon_pipeline(
     parquet_dir = config.PARQUET_DIR / "stock_history"
     parquet_dir.mkdir(parents=True, exist_ok=True)
     
-    # Get max workers
+    # Get max workers & calls/minute
     max_workers = config.get_optional_int("POLYGON_MAX_WORKERS", DEFAULT_MAX_WORKERS)
-    logger.info(f"Using up to {max_workers} workers")
+    calls_per_minute_cfg = config.get_optional_int("POLYGON_CALLS_PER_MINUTE", DEFAULT_CALLS_PER_MINUTE)
+    calls_per_minute = calls_per_minute_cfg if calls_per_minute_cfg is not None else DEFAULT_CALLS_PER_MINUTE
+    logger.info(f"Using up to {max_workers} workers at {calls_per_minute} calls/min")
     logger.info(f"Mode: {mode}")
     logger.info(f"Lookback period: {lookback_years} years")
     
@@ -590,7 +562,8 @@ def run_polygon_pipeline(
                     'start_date': adjusted_start,
                     'end_date': end_d,
                     'api_key': api_key,
-                    'db_path': config.DB_FILE_STR
+                    'db_path': config.DB_FILE_STR,
+                    'calls_per_minute': calls_per_minute
                 })
         logger.info(f"Created {len(jobs)} jobs from plan table.")
         if clamped_intervals:
@@ -609,7 +582,8 @@ def run_polygon_pipeline(
                         'start_date': start_date,
                         'end_date': end_date,
                         'api_key': api_key,
-                        'db_path': config.DB_FILE_STR
+                        'db_path': config.DB_FILE_STR,
+                        'calls_per_minute': calls_per_minute
                     })
                 total_intervals_created = len(jobs)
             else:
@@ -633,7 +607,8 @@ def run_polygon_pipeline(
                             'start_date': interval['start'],
                             'end_date': interval['end'],
                             'api_key': api_key,
-                            'db_path': config.DB_FILE_STR
+                            'db_path': config.DB_FILE_STR,
+                            'calls_per_minute': calls_per_minute
                         })
                         total_intervals_created += 1
         logger.info(f"Created {total_intervals_created} fetch intervals across {len(tickers)} tickers (skipped {skipped_fully_up_to_date} fully up-to-date tickers)")
@@ -653,9 +628,9 @@ def run_polygon_pipeline(
     logger.info(f"⏰ Pipeline will run for maximum {max_runtime_hours:.1f} hours")
     logger.info(f"📊 Total jobs to process: {len(jobs)}")
     # Calculate realistic throughput estimate
-    calls_per_hour = 3 * 60  # 3 calls/min conservative
-    estimated_hours = len(jobs) / calls_per_hour
-    logger.info(f"⏱️  Estimated time: {estimated_hours:.1f} hours at conservative rate (3 calls/min)")
+    calls_per_hour = calls_per_minute * 60
+    estimated_hours = len(jobs) / calls_per_hour if calls_per_hour else 0
+    logger.info(f"⏱️  Estimated time: {estimated_hours:.1f} hours at configured rate ({calls_per_minute} calls/min)")
     
     # Process jobs
     success_count = 0
