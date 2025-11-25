@@ -85,24 +85,25 @@ def get_tickers_to_fetch(
     target_tickers: Optional[List[str]] = None,
     limit: Optional[int] = None
 ) -> List[str]:
-    """Get list of tickers to fetch info for."""
+    """Get list of tickers to fetch info for.
+    
+    Note: Does NOT apply ORDER BY - ordering should be handled by prioritization.
+    If no prioritization requested, tickers will be in natural DB order.
+    """
     logger.info("Querying for tickers to fetch info...")
     
     if target_tickers:
         logger.info(f"Using provided list of {len(target_tickers)} target tickers")
         return target_tickers[:limit] if limit else target_tickers
     
-    # Get all tickers from database
-    query = "SELECT DISTINCT ticker FROM tickers WHERE ticker IS NOT NULL ORDER BY ticker;"
+    # Get all tickers from database (no ORDER BY - let prioritization handle ordering)
+    query = "SELECT DISTINCT ticker FROM tickers WHERE ticker IS NOT NULL;"
     tickers_df = con.execute(query).df()
     all_tickers = tickers_df['ticker'].tolist()
     
     logger.info(f"Found {len(all_tickers)} unique tickers in database")
     
-    if limit:
-        all_tickers = all_tickers[:limit]
-        logger.info(f"Limited to {len(all_tickers)} tickers")
-    
+    # Do NOT apply limit here - let it happen after prioritization
     return all_tickers
 
 

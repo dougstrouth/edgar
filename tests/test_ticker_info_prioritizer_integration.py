@@ -17,7 +17,8 @@ class DummyConfig(AppConfig):
 
 def fake_prioritizer(db_path: str, tickers: List[str], lookback_days: int) -> List[Tuple[str, float]]:
     # Reverse order scoring for test determinism
-    return [(t, i) for i, t in enumerate(reversed(tickers), 1)]
+    # Give highest scores to last tickers (so AAA gets lowest score)
+    return [(t, len(tickers) - i) for i, t in enumerate(tickers)]
 
 
 def test_prioritize_applies_order(monkeypatch, tmp_path):

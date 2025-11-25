@@ -86,7 +86,29 @@ def parse_weights(raw: str | None) -> Dict[str, float]:
     return out
 
 
-def build_query(w: Dict[str, float]) -> str:
+def build_query(w: Dict[str, float], exclude_untrackable: bool = True) -> str:
+    """Build the prioritization query.
+    
+    Args:
+        w: Weight dictionary for scoring components
+        exclude_untrackable: If True and polygon_untrackable_tickers exists, exclude those tickers
+    """
+    # Conditionally add untrackable CTE and filter
+    untrackable_cte = ""
+    untrackable_join = ""
+    untrackable_filter = ""
+    
+    if exclude_untrackable:
+        untrackable_cte = """, polygon_untrackable AS (
+    SELECT ticker
+    FROM polygon_untrackable_tickers
+    WHERE last_failed_timestamp >= (CURRENT_DATE - INTERVAL 365 DAY)
+)"""
+        untrackable_join = """
+    LEFT JOIN polygon_untrackable pu ON pu.ticker = t.ticker"""
+        untrackable_filter = """
+      AND pu.ticker IS NULL  -- Exclude untrackable tickers"""
+    
     # All SQL uses window functions for normalization; weights are injected as literals.
     return f"""
 WITH fact_metrics AS (
@@ -111,7 +133,7 @@ WITH fact_metrics AS (
     FROM filings
     WHERE filing_date >= (CURRENT_DATE - INTERVAL 365 DAY)
     GROUP BY cik
-), base AS (
+){untrackable_cte}, base AS (
     SELECT t.ticker, t.cik,
            fm.unique_tag_count, fm.key_metric_count,
            sh.last_date, sh.record_count,
@@ -119,8 +141,8 @@ WITH fact_metrics AS (
     FROM updated_ticker_info t
     JOIN fact_metrics fm USING(cik)
     LEFT JOIN stock_hist sh ON sh.ticker = t.ticker
-    LEFT JOIN recent_filings rf USING(cik)
-    WHERE t.ticker IS NOT NULL
+    LEFT JOIN recent_filings rf USING(cik){untrackable_join}
+    WHERE t.ticker IS NOT NULL{untrackable_filter}
 ), scored AS (
     SELECT *,
         CASE
@@ -186,7 +208,19 @@ def main() -> None:
     logger.info(f"Row limit: {args.limit if args.limit else 'ALL'}")
 
     con = duckdb.connect(db_path, read_only=False)
-    query = build_query(weights)
+    
+    # Check if polygon_untrackable_tickers table exists
+    tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+    has_untrackable = 'polygon_untrackable_tickers' in tables
+    
+    if has_untrackable:
+        result = con.execute("SELECT COUNT(*) FROM polygon_untrackable_tickers WHERE last_failed_timestamp >= (CURRENT_DATE - INTERVAL 365 DAY)").fetchone()
+        untrackable_count = result[0] if result else 0
+        logger.info(f"Found {untrackable_count} untrackable tickers (365d window) to exclude from prioritization")
+    else:
+        logger.info("polygon_untrackable_tickers table not found - will include all tickers")
+    
+    query = build_query(weights, exclude_untrackable=has_untrackable)
     logger.info("Executing scoring query (vectorized)...")
     df = con.execute(query).df()
     logger.info(f"Scored {len(df)} candidate backlog tickers.")
