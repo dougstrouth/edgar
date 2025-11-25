@@ -205,12 +205,21 @@ def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Log
         "stock_history", # From stock_data_gatherer
         "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations"
     ]
+
+    # Build a unified ticker source that includes authoritative EDGAR tickers
+    # and, if available, enriched tickers from the Massive/Polygon reference table.
+    ticker_source_sql = "(SELECT DISTINCT ticker FROM tickers)"
+    if 'massive_tickers' in db_tables:
+        ticker_source_sql = (
+            "(SELECT DISTINCT ticker FROM tickers "
+            "UNION SELECT DISTINCT ticker FROM massive_tickers)"
+        )
     for table in yf_tables_with_ticker:
         if table.lower() in db_tables:
             query = f"""
                 SELECT COUNT(t1.ticker) as count
                 FROM {table} t1
-                LEFT JOIN tickers t2 ON t1.ticker = t2.ticker
+                LEFT JOIN {ticker_source_sql} t2 ON t1.ticker = t2.ticker
                 WHERE t2.ticker IS NULL;
             """
             results.append(run_validation_query(con, query, f"Ticker Consistency Check: {table} -> tickers", logger, expect_zero=True))

@@ -189,11 +189,16 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                                 SELECT *, ROW_NUMBER() OVER(PARTITION BY cik) as rn FROM read_parquet('{parquet_path}/*.parquet')
                             ) WHERE rn = 1;""")
                     elif table == "tickers":
-                        # Special handling for tickers to ensure ticker, exchange is unique
                         db_conn.execute(f"""
-                            CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM (
-                                SELECT *, ROW_NUMBER() OVER(PARTITION BY ticker, exchange) as rn FROM read_parquet('{parquet_path}/*.parquet')
-                            ) WHERE rn = 1;""")
+                            CREATE OR REPLACE TABLE {table_new} AS
+                            SELECT t.cik, t.ticker, t.exchange, t.source
+                            FROM (
+                                SELECT cik, ticker, exchange, source,
+                                       ROW_NUMBER() OVER(PARTITION BY ticker, exchange) AS rn
+                                FROM read_parquet('{parquet_path}/*.parquet')
+                            ) t
+                            JOIN companies_new c ON t.cik = c.cik
+                            WHERE t.rn = 1;""")
                     elif table == "xbrl_tags":
                         # Special handling for xbrl_tags to ensure taxonomy, tag_name is unique
                         db_conn.execute(f"""
@@ -201,7 +206,14 @@ def load_parquet_to_db(config: AppConfig, logger: logging.Logger):
                                 SELECT *, ROW_NUMBER() OVER(PARTITION BY taxonomy, tag_name) as rn FROM read_parquet('{parquet_path}/*.parquet')
                             ) WHERE rn = 1;""")
                     else:
-                        db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
+                        if table == "former_names":
+                            db_conn.execute(f"""
+                                CREATE OR REPLACE TABLE {table_new} AS
+                                SELECT f.*
+                                FROM read_parquet('{parquet_path}/*.parquet') f
+                                JOIN companies_new c ON f.cik = c.cik;""")
+                        else:
+                            db_conn.execute(f"CREATE OR REPLACE TABLE {table_new} AS SELECT * FROM read_parquet('{parquet_path}/*.parquet');")
                 else:
                     logger.warning(f"Parquet directory for '{table}' not found or empty. Creating empty new table.")
                     db_conn.execute(SCHEMA[table].replace(f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE OR REPLACE TABLE {table_new}"))
