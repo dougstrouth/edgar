@@ -57,7 +57,7 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 
 # Constants
 DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
-BATCH_SIZE = 100  # Number of records before writing to parquet
+BATCH_SIZE = 100  # Default number of records before writing to parquet (override via .env POLYGON_BATCH_SIZE)
 LOOKBACK_YEARS = 5  # Default historical data period
 DEFAULT_MAX_RUNTIME_HOURS = 15  # Default max runtime (increased for rate limiting)
 DEFAULT_CALLS_PER_MINUTE = 3  # Align with ticker info gatherer (can raise to 5 safely)
@@ -112,7 +112,11 @@ def get_latest_stock_dates(
     con: duckdb.DuckDBPyConnection,
     tickers: List[str]
 ) -> Dict[str, date]:
-    """Get the latest date we have stock data for each ticker."""
+    """Get the latest date we have stock data for each ticker.
+    
+    Note: Polygon normalizes tickers (e.g., BH-A becomes BH.A). We need to query
+    for both the original ticker and its normalized form.
+    """
     logger.info("Querying latest existing stock data dates...")
     latest_dates: Dict[str, date] = {}
     
@@ -123,32 +127,49 @@ def get_latest_stock_dates(
             logger.info("stock_history table doesn't exist yet, will fetch all data")
             return latest_dates
         
-        # Get latest dates for our tickers
-        placeholders = ','.join(['?'] * len(tickers))
+        # Polygon normalizes tickers: replaces hyphens with periods (e.g., BH-A -> BH.A)
+        # Create a list of both original and normalized tickers to query
+        tickers_to_query = set()
+        ticker_map = {}  # Maps normalized ticker back to original
+        for t in tickers:
+            tickers_to_query.add(t)
+            ticker_map[t] = t
+            # Also add normalized form (hyphen -> period)
+            if '-' in t:
+                normalized = t.replace('-', '.')
+                tickers_to_query.add(normalized)
+                ticker_map[normalized] = t  # Map normalized back to original
+        
+        # Get latest dates for our tickers (both forms)
+        tickers_list = list(tickers_to_query)
+        placeholders = ','.join(['?'] * len(tickers_list))
         query = f"""
             SELECT ticker, MAX(date) as latest_date
             FROM stock_history
             WHERE ticker IN ({placeholders})
             GROUP BY ticker
         """
-        result_df = con.execute(query, tickers).df()
+        result_df = con.execute(query, tickers_list).df().df()
         
         for _, row in result_df.iterrows():
-            ticker = row['ticker']
+            ticker_in_table = row['ticker']
             latest = row['latest_date']
             if pd.notna(latest):
+                # Map back to original ticker name (in case it was normalized)
+                original_ticker = ticker_map.get(ticker_in_table, ticker_in_table)
+                
                 # Normalize to python date object
                 if isinstance(latest, str):
-                    latest_dates[ticker] = datetime.fromisoformat(latest).date()
+                    latest_dates[original_ticker] = datetime.fromisoformat(latest).date()
                 elif isinstance(latest, pd.Timestamp):
-                    latest_dates[ticker] = latest.date()
+                    latest_dates[original_ticker] = latest.date()
                 elif isinstance(latest, datetime):
-                    latest_dates[ticker] = latest.date()
+                    latest_dates[original_ticker] = latest.date()
                 elif isinstance(latest, date):
-                    latest_dates[ticker] = latest
+                    latest_dates[original_ticker] = latest
                 else:
                     # Fallback: try pandas to_datetime then .date()
-                    latest_dates[ticker] = pd.to_datetime(latest).date()
+                    latest_dates[original_ticker] = pd.to_datetime(latest).date()
         
         logger.info(f"Found existing data for {len(latest_dates)} tickers")
         
@@ -169,10 +190,17 @@ def get_missing_intervals(
     This function queries existing dates for the ticker between start_date and end_date
     and returns the complementary intervals that need fetching. If no rows exist,
     returns a single interval covering the full requested range.
+    
+    Note: Polygon normalizes tickers (e.g., BH-A becomes BH.A). We check both forms.
     """
     try:
-        query = "SELECT date FROM stock_history WHERE ticker = ? AND date BETWEEN ? AND ? ORDER BY date"
-        rows = con.execute(query, [ticker, start_date, end_date]).fetchall()
+        # Query for both original ticker and normalized form (hyphen -> period)
+        tickers_to_check = [ticker]
+        if '-' in ticker:
+            tickers_to_check.append(ticker.replace('-', '.'))
+        
+        query = "SELECT date FROM stock_history WHERE ticker IN (?, ?) AND date BETWEEN ? AND ? ORDER BY date"
+        rows = con.execute(query, [tickers_to_check[0], tickers_to_check[1] if len(tickers_to_check) > 1 else tickers_to_check[0], start_date, end_date]).fetchall()
         existing = [r[0] for r in rows]
     except Exception as e:
         logger.warning(f"Could not query existing dates for {ticker}: {e}")
@@ -626,6 +654,9 @@ def run_polygon_pipeline(
     max_runtime_seconds = int(max_runtime_hours * 60 * 60)
     
     logger.info(f"⏰ Pipeline will run for maximum {max_runtime_hours:.1f} hours")
+    # Unified batch size override
+    batch_size_env = config.get_optional_int("POLYGON_BATCH_SIZE", BATCH_SIZE)
+    effective_batch_size = batch_size_env if batch_size_env is not None else BATCH_SIZE
     logger.info(f"📊 Total jobs to process: {len(jobs)}")
     # Calculate realistic throughput estimate
     calls_per_hour = calls_per_minute * 60
@@ -643,8 +674,8 @@ def run_polygon_pipeline(
     data_batch = []
     
     # Track last write to database
-    last_db_write_time = time.time()
-    db_write_interval = 15 * 60  # Write to DB every 15 minutes
+    logger.info(f"Batch size: {effective_batch_size}")
+    # Removing periodic DB write interval logic per simplification request (option A)
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(fetch_worker, job): job for job in jobs}
@@ -675,26 +706,14 @@ def run_polygon_pipeline(
                 data_batch.append(result['data'])
                 
                 # Write batch if we've accumulated enough OR if it's time for periodic DB write
-                should_write_batch = len(data_batch) >= BATCH_SIZE
-                should_write_db = (time.time() - last_db_write_time) >= db_write_interval
-                
-                if should_write_batch or (should_write_db and data_batch):
+                should_write_batch = len(data_batch) >= effective_batch_size
+
+                if should_write_batch:
                     combined_df = pd.concat(data_batch, ignore_index=True)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = parquet_dir / f"polygon_batch_{timestamp}.parquet"
                     combined_df.to_parquet(filename, index=False, engine='pyarrow')
-                    logger.info(f"📦 Wrote batch of {len(combined_df)} records to {filename.name}")
-                    
-                    # Load to database periodically
-                    if should_write_db:
-                        logger.info(f"💾 Loading data to database (periodic checkpoint)...")
-                        try:
-                            load_parquet_to_db(config.DB_FILE_STR, parquet_dir, logger)
-                            last_db_write_time = time.time()
-                            logger.info(f"✅ Database updated successfully")
-                        except Exception as e:
-                            logger.error(f"Failed to load to database: {e}")
-                    
+                    logger.info(f"📦 Wrote batch of {len(combined_df)} records to {filename.name} (batch_size={effective_batch_size})")
                     data_batch = []
                     
             elif result['status'] == 'empty':
@@ -716,15 +735,9 @@ def run_polygon_pipeline(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = parquet_dir / f"polygon_batch_{timestamp}.parquet"
         combined_df.to_parquet(filename, index=False, engine='pyarrow')
-        logger.info(f"📦 Wrote final batch of {len(combined_df)} records to {filename.name}")
+        logger.info(f"📦 Wrote final batch of {len(combined_df)} records to {filename.name} (batch_size={effective_batch_size})")
     
-    # Final database load
-    logger.info(f"💾 Loading all data to database (final load)...")
-    try:
-        load_parquet_to_db(config.DB_FILE_STR, parquet_dir, logger)
-        logger.info(f"✅ Final database load completed successfully")
-    except Exception as e:
-        logger.error(f"Failed final database load: {e}")
+    # Removed automatic final DB load; user runs explicit loader script separately.
     
     # Calculate runtime
     total_runtime = time.time() - pipeline_start_time

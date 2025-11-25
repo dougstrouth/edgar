@@ -54,7 +54,7 @@ logger = setup_logging(SCRIPT_NAME, LOG_DIRECTORY, level=logging.INFO)
 # Constants
 DEFAULT_MAX_WORKERS = 1  # Free tier safe: 5 req/min global
 DEFAULT_CALLS_PER_MINUTE = 3  # Conservative default (max 5 for free tier)
-BATCH_SIZE = 100  # Number of records before writing to parquet
+BATCH_SIZE = 100  # Default number of records before writing to parquet (override via env POLYGON_BATCH_SIZE)
 DEFAULT_INFO_MAX_RUNTIME_HOURS = 4  # Safeguard to avoid runaway
 DEFAULT_REFRESH_DAYS = 30  # Re-fetch info if older than this (unless force-refresh)
 
@@ -112,7 +112,11 @@ def get_existing_ticker_info(
     con: duckdb.DuckDBPyConnection,
     tickers: List[str]
 ) -> Dict[str, datetime]:
-    """Get the last fetch timestamp for tickers we already have info for."""
+    """Get the last fetch timestamp for tickers we already have info for.
+    
+    Note: Polygon normalizes tickers (e.g., BH-A becomes BH.A). We need to query
+    for both the original ticker and its normalized form.
+    """
     logger.info("Querying existing ticker info fetch timestamps...")
     existing_info: Dict[str, datetime] = {}
     
@@ -123,28 +127,45 @@ def get_existing_ticker_info(
             logger.info("updated_ticker_info table doesn't exist yet")
             return existing_info
         
-        # Get latest fetch timestamps for our tickers
-        placeholders = ','.join(['?'] * len(tickers))
+        # Polygon normalizes tickers: replaces hyphens with periods (e.g., BH-A -> BH.A)
+        # Create a list of both original and normalized tickers to query
+        tickers_to_query = set()
+        ticker_map = {}  # Maps normalized ticker back to original
+        for t in tickers:
+            tickers_to_query.add(t)
+            ticker_map[t] = t
+            # Also add normalized form (hyphen -> period)
+            if '-' in t:
+                normalized = t.replace('-', '.')
+                tickers_to_query.add(normalized)
+                ticker_map[normalized] = t  # Map normalized back to original
+        
+        # Get latest fetch timestamps for our tickers (both forms)
+        tickers_list = list(tickers_to_query)
+        placeholders = ','.join(['?'] * len(tickers_list))
         query = f"""
             SELECT ticker, fetch_timestamp
             FROM updated_ticker_info
             WHERE ticker IN ({placeholders})
         """
-        result_df = con.execute(query, tickers).df()
+        result_df = con.execute(query, tickers_list).df()
         
         for _, row in result_df.iterrows():
-            ticker = row['ticker']
+            ticker_in_table = row['ticker']
             fetch_ts = row['fetch_timestamp']
             if pd.notna(fetch_ts):
+                # Map back to original ticker name (in case it was normalized)
+                original_ticker = ticker_map.get(ticker_in_table, ticker_in_table)
+                
                 # Normalize to python datetime object
                 if isinstance(fetch_ts, str):
-                    existing_info[ticker] = datetime.fromisoformat(fetch_ts)
+                    existing_info[original_ticker] = datetime.fromisoformat(fetch_ts)
                 elif isinstance(fetch_ts, pd.Timestamp):
-                    existing_info[ticker] = fetch_ts.to_pydatetime()
+                    existing_info[original_ticker] = fetch_ts.to_pydatetime()
                 elif isinstance(fetch_ts, datetime):
-                    existing_info[ticker] = fetch_ts
+                    existing_info[original_ticker] = fetch_ts
                 else:
-                    existing_info[ticker] = pd.to_datetime(fetch_ts).to_pydatetime()
+                    existing_info[original_ticker] = pd.to_datetime(fetch_ts).to_pydatetime()
         
         logger.info(f"Found existing info for {len(existing_info)} tickers")
         
@@ -331,6 +352,8 @@ def run_polygon_ticker_info_pipeline(
     calls_per_minute = config.get_optional_int("POLYGON_CALLS_PER_MINUTE", DEFAULT_CALLS_PER_MINUTE)
     # Ensure we have a valid value (shouldn't be None with default, but be safe)
     calls_per_minute = calls_per_minute if calls_per_minute is not None else DEFAULT_CALLS_PER_MINUTE
+    batch_size_env = config.get_optional_int("POLYGON_BATCH_SIZE", BATCH_SIZE)
+    effective_batch_size = batch_size_env if batch_size_env is not None else BATCH_SIZE
     logger.info(f"Using up to {max_workers} workers at {calls_per_minute} calls/min")
 
     # Runtime & refresh windows from env
@@ -436,7 +459,7 @@ def run_polygon_ticker_info_pipeline(
             empty_count += 1
 
         # Batch write condition
-        if len(data_batch) >= BATCH_SIZE:
+        if len(data_batch) >= effective_batch_size:
             write_batch(parquet_dir, data_batch)
             data_batch.clear()
 
@@ -454,7 +477,7 @@ def run_polygon_ticker_info_pipeline(
         ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         file = parquet_dir / f"ticker_info_batch_{ts}.parquet"
         df.to_parquet(file, index=False, engine='pyarrow', compression='snappy')
-        logger.info(f"📦 Wrote batch of {len(df)} ticker info records to {file.name}")
+        logger.info(f"📦 Wrote batch of {len(df)} ticker info records to {file.name} (batch_size={effective_batch_size})")
 
     if max_workers == 1:
         # Single-worker mode: create ONE shared client to maintain rate limit state

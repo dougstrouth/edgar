@@ -57,43 +57,54 @@ class PolygonRateLimiter:
         self.max_min_interval = 60.0  # one minute between requests maximum
 
     def wait_if_needed(self):
-        """Wait if necessary based on sliding window and min_interval spacing."""
+        """Unified wait logic combining window capacity and spacing.
+
+        Computes the next admissible timestamp based on:
+        - sliding window (oldest + window_seconds when window full)
+        - min_interval since last request
+        Chooses the max of both (most restrictive). Adds a small 0.2s safety pad.
+        """
         now = time.time()
         cutoff = now - self.window_seconds
+        # Trim old timestamps
         self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
 
-        # Sliding window enforcement: if already hit limit for the minute, wait until window frees
+        next_by_window: Optional[float] = None
         if len(self.request_timestamps) >= self.calls_per_minute:
             oldest = self.request_timestamps[0]
-            wait_time = (oldest + self.window_seconds) - now + 0.5  # small buffer
+            next_by_window = oldest + self.window_seconds
+
+        next_by_spacing: Optional[float] = None
+        if self.request_timestamps:
+            last = self.request_timestamps[-1]
+            next_by_spacing = last + self.min_interval
+
+        # Aggressive spacing optionally extends spacing target
+        if self.aggressive_spacing and next_by_spacing is not None:
+            aggressive_target = self.request_timestamps[-1] + (1.25 * self.min_interval)
+            if aggressive_target > next_by_spacing:
+                next_by_spacing = aggressive_target
+
+        targets = [t for t in [next_by_window, next_by_spacing] if t is not None]
+        if targets:
+            target_time = max(targets)
+            wait_time = target_time - now + 0.2  # small safety pad
             if wait_time > 0:
-                logger.info(f"Rate window full ({len(self.request_timestamps)}/{self.calls_per_minute}). Waiting {wait_time:.2f}s")
+                # Preserve recognizable phrasing for existing logs (window/full) if window was limiting
+                if next_by_window and target_time == next_by_window:
+                    logger.info(
+                        f"Rate limiting: window full ({len(self.request_timestamps)}/{self.calls_per_minute}). Waiting {wait_time:.2f}s"
+                    )
+                else:
+                    logger.debug(
+                        f"Rate limiting: spacing enforcement waiting {wait_time:.2f}s (min_interval={self.min_interval:.2f}s)"
+                    )
                 time.sleep(wait_time)
                 now = time.time()
                 cutoff = now - self.window_seconds
                 self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
 
-        # Spacing enforcement: ensure at least min_interval since last request
-        if self.request_timestamps:
-            time_since_last = now - self.request_timestamps[-1]
-            if time_since_last < self.min_interval:
-                delay = self.min_interval - time_since_last
-                logger.debug(f"Spacing: waiting {delay:.2f}s to honor min_interval={self.min_interval:.2f}s")
-                time.sleep(delay)
-                now = time.time()
-
-        # Legacy aggressive spacing (if enabled) adds an extra padding to min_interval logic
-        if self.aggressive_spacing and self.request_timestamps:
-            # Ensure at least 1.25 * min_interval in aggressive mode
-            time_since_last = now - self.request_timestamps[-1]
-            target = 1.25 * self.min_interval
-            if time_since_last < target:
-                delay = target - time_since_last
-                logger.debug(f"Aggressive spacing: waiting additional {delay:.2f}s")
-                time.sleep(delay)
-                now = time.time()
-
-        self.request_timestamps.append(now)
+        self.request_timestamps.append(time.time())
 
     def on_rate_limit_hit(self):
         """Called when a 429 is encountered. Back off request rate and increase spacing."""

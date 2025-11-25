@@ -184,6 +184,15 @@ The built-in client targets `https://api.massive.com` (Polygon rebrand) and appl
 Environment knobs:
 - `POLYGON_MAX_WORKERS=1` (recommended for free tier)
 - `POLYGON_CALLS_PER_MINUTE=3` (safe default; max 5 on free tier)
+- `POLYGON_BATCH_SIZE=100` (optional; unified batch size for both Massive/Polygon gatherers. Controls how many rows are buffered before writing a parquet batch. Larger values reduce small-file churn; smaller values surface data sooner.)
+
+Batching & Load Simplification:
+- The stock price gatherer no longer performs periodic or automatic final database loads. It only writes parquet batches. Run `python update_from_parquet.py` (or the dedicated load scripts) when you want to ingest newly written parquet files.
+- This decoupling improves reliability (DB load happens in an explicit, restartable step) and reduces contention with long-running gathers.
+
+Migration Note:
+- Deprecated variables removed: `POLYGON_STOCK_BATCH_SIZE`, `POLYGON_STOCK_DB_WRITE_INTERVAL_SECONDS`, `POLYGON_INFO_BATCH_SIZE`.
+- Replace any prior references with the single `POLYGON_BATCH_SIZE` variable. Leaving old vars in `.env` has no effect.
 
 ## VS Code Debugging
 
