@@ -35,63 +35,79 @@ class PolygonRateLimiter:
     """
     Rate limiter for Massive.com (formerly Polygon.io) API.
     Free tier: 5 calls per minute.
-    
-    Uses a sliding window approach to track actual request timestamps
-    and ensure we never exceed the limit.
+
+    Behavior:
+    - Maintains sliding window of request timestamps.
+    - Enforces a minimum spacing between calls via `min_interval` (initially 60 / calls_per_minute).
+    - On 429, increases `min_interval` (exponential bump) and decreases allowed calls_per_minute to back off.
+    - Provides attribute `min_interval` expected by tests.
     """
-    
-    def __init__(self, calls_per_minute: int = 5):
+
+    def __init__(self, calls_per_minute: int = 5, aggressive_spacing: bool = False):
         self.calls_per_minute = calls_per_minute
-        self.window_seconds = 60.0  # 1 minute sliding window
-        self.request_timestamps: List[float] = []  # Track actual request times
-        
+        self.window_seconds = 60.0
+        self.request_timestamps: List[float] = []
+        # Base minimum interval between requests (seconds)
+        self.min_interval: float = 60.0 / max(1, calls_per_minute)
+        # Optional flag: if True we still enforce spacing even when under limit (legacy conservative mode)
+        self.aggressive_spacing = aggressive_spacing
+        # Backoff multiplier for min_interval after 429
+        self.backoff_multiplier = 2.0
+        # Cap for min_interval to avoid unbounded growth
+        self.max_min_interval = 60.0  # one minute between requests maximum
+
     def wait_if_needed(self):
-        """Wait if necessary to respect rate limits using sliding window."""
+        """Wait if necessary based on sliding window and min_interval spacing."""
         now = time.time()
-        
-        # Remove requests older than the window
         cutoff = now - self.window_seconds
         self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
-        
-        # If we're at the limit, wait until the oldest request expires
+
+        # Sliding window enforcement: if already hit limit for the minute, wait until window frees
         if len(self.request_timestamps) >= self.calls_per_minute:
             oldest = self.request_timestamps[0]
-            wait_time = (oldest + self.window_seconds) - now + 2.0  # Add 2s buffer for safety
+            wait_time = (oldest + self.window_seconds) - now + 0.5  # small buffer
             if wait_time > 0:
-                logger.info(f"Rate limit: {len(self.request_timestamps)}/{self.calls_per_minute} calls in window. Waiting {wait_time:.1f}s")
+                logger.info(f"Rate window full ({len(self.request_timestamps)}/{self.calls_per_minute}). Waiting {wait_time:.2f}s")
                 time.sleep(wait_time)
-                # Clean up again after waiting
                 now = time.time()
                 cutoff = now - self.window_seconds
                 self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
-        
-        # Add a small delay between ALL requests (even when under limit) to be extra conservative
-        # This helps avoid burst traffic that might trigger undocumented rate limits
-        if self.request_timestamps:  # If we've made any requests before
+
+        # Spacing enforcement: ensure at least min_interval since last request
+        if self.request_timestamps:
             time_since_last = now - self.request_timestamps[-1]
-            min_spacing = 20.0  # Minimum 20 seconds between requests (3 per minute = one every 20s)
-            if time_since_last < min_spacing:
-                delay = min_spacing - time_since_last
-                logger.info(f"Spacing requests: waiting {delay:.1f}s since last call")
+            if time_since_last < self.min_interval:
+                delay = self.min_interval - time_since_last
+                logger.debug(f"Spacing: waiting {delay:.2f}s to honor min_interval={self.min_interval:.2f}s")
                 time.sleep(delay)
-                now = time.time()  # Update timestamp after the delay
-        
-        # Record this request at the current time (will be just before the actual HTTP call)
+                now = time.time()
+
+        # Legacy aggressive spacing (if enabled) adds an extra padding to min_interval logic
+        if self.aggressive_spacing and self.request_timestamps:
+            # Ensure at least 1.25 * min_interval in aggressive mode
+            time_since_last = now - self.request_timestamps[-1]
+            target = 1.25 * self.min_interval
+            if time_since_last < target:
+                delay = target - time_since_last
+                logger.debug(f"Aggressive spacing: waiting additional {delay:.2f}s")
+                time.sleep(delay)
+                now = time.time()
+
         self.request_timestamps.append(now)
-        
-    def record_request(self):
-        """
-        DEPRECATED: Request recording now happens in wait_if_needed().
-        This method is kept for backward compatibility but does nothing.
-        """
-        pass
-    
+
     def on_rate_limit_hit(self):
-        """Called when a 429 is encountered. Reduces calls per minute."""
-        old_limit = self.calls_per_minute
-        self.calls_per_minute = max(1, self.calls_per_minute - 1)  # Drop by 1, minimum 1
-        logger.warning(f"Rate limit hit! Reducing from {old_limit} to {self.calls_per_minute} calls/min")
-        # Keep existing timestamps - they already reflect actual call history
+        """Called when a 429 is encountered. Back off request rate and increase spacing."""
+        old_cpm = self.calls_per_minute
+        self.calls_per_minute = max(1, self.calls_per_minute - 1)
+        # Increase min_interval exponentially and enforce a minimum of 15s, then cap
+        new_min = self.min_interval * self.backoff_multiplier
+        if new_min < 15.0:
+            new_min = 15.0
+        new_min = min(new_min, self.max_min_interval)
+        logger.warning(
+            f"Rate limit hit (429). calls_per_minute {old_cpm} -> {self.calls_per_minute}; min_interval {self.min_interval:.2f}s -> {new_min:.2f}s"
+        )
+        self.min_interval = new_min
 
 
 class PolygonClient:
