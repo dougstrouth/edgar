@@ -111,6 +111,14 @@ This document provides a detailed description of the database schema used in the
 | `cma` | `DOUBLE` | |
 | `rf` | `DOUBLE` | |
 
+### `polygon_untrackable_tickers`
+
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `ticker` | `VARCHAR` | |
+| `reason` | `VARCHAR` | |
+| `last_failed_timestamp` | `TIMESTAMP WITH TIME ZONE` | |
+
 ### `prioritized_tickers_stock_backlog`
 
 | Column Name | Data Type | Description |

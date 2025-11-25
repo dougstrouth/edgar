@@ -186,6 +186,13 @@ Environment knobs:
 - `POLYGON_CALLS_PER_MINUTE=3` (safe default; max 5 on free tier)
 - `POLYGON_BATCH_SIZE=100` (optional; unified batch size for both Massive/Polygon gatherers. Controls how many rows are buffered before writing a parquet batch. Larger values reduce small-file churn; smaller values surface data sooner.)
 
+**Recent Improvements (November 2025):**
+- **Unified Configuration**: Single `POLYGON_BATCH_SIZE` variable replaces separate stock/info batch sizes. Deprecated variables (`POLYGON_STOCK_BATCH_SIZE`, `POLYGON_INFO_BATCH_SIZE`, `POLYGON_STOCK_DB_WRITE_INTERVAL_SECONDS`) removed.
+- **Decoupled Database Loading**: Stock gatherers no longer perform automatic database writes. Gathering and loading are now separate, explicit steps for improved reliability and easier recovery. Use `python update_from_parquet.py` after gathering completes.
+- **Rate Limiter Preservation**: Single-worker mode now reuses one `PolygonClient` instance across all jobs, preserving backoff state and preventing rate limiter resets.
+- **Code Quality**: Removed duplicate function definitions from `stock_data_gatherer_polygon.py` (file size reduced by ~50%), added defensive `fetchone()` handling to prevent potential None indexing crashes.
+- **Enhanced Diagnostics**: Improved error classification and proactive code quality monitoring.
+
 Batching & Load Simplification:
 - The stock price gatherer no longer performs periodic or automatic final database loads. It only writes parquet batches. Run `python update_from_parquet.py` (or the dedicated load scripts) when you want to ingest newly written parquet files.
 - This decoupling improves reliability (DB load happens in an explicit, restartable step) and reduces contention with long-running gathers.

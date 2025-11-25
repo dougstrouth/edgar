@@ -2,11 +2,12 @@
 
 ## Features
 
-✅ **9-Hour Maximum Runtime** - Automatically stops after 9 hours  
-✅ **Rate Limit Enforcement** - Respects 5 calls/minute free tier limit  
-✅ **Periodic Database Writes** - Writes to database every 15 minutes  
+✅ **15-Hour Maximum Runtime** - Automatically stops after 15 hours  
+✅ **Rate Limit Enforcement** - Respects 5 calls/minute free tier limit with intelligent backoff  
+✅ **Continuous Parquet Writing** - Writes parquet batches as data is fetched  
 ✅ **Progress Tracking** - Shows elapsed time, remaining time, and success/error counts  
 ✅ **Automatic Recovery** - Saves parquet files continuously, can resume if interrupted  
+✅ **Decoupled DB Loading** - Database ingestion is a separate, explicit step after gathering  
 
 ## How to Run Overnight
 
@@ -28,16 +29,29 @@ tail -f logs/overnight_polygon_*.log
 # Check for errors
 grep ERROR logs/overnight_polygon_*.log
 
-# Check progress updates
-grep "📈 Progress" logs/overnight_polygon_*.log
+# Check success/failure counts
+grep "Pipeline Summary" -A 10 logs/overnight_polygon_*.log
 ```
 
-### 3. Safety Features
+### 3. Load Parquet Data to Database
 
-- **Automatic Timeout**: Stops after 9 hours
-- **Periodic Saves**: Data written to database every 15 minutes
-- **Rate Limiting**: Worker processes use 4 calls/min (under the 5/min limit)
-- **Graceful Shutdown**: Can Ctrl+C and data will be saved
+**After gathering completes**, load the parquet files into DuckDB:
+
+```bash
+# Load all new stock history parquet files
+.venv/bin/python update_from_parquet.py
+
+# Or use the dedicated loader
+.venv/bin/python data_processing/load_supplementary_data.py
+```
+
+### 4. Safety Features
+
+- **Automatic Timeout**: Stops after 15 hours
+- **Continuous Parquet Saves**: Data written to parquet as batches complete
+- **Rate Limiting**: Default 3 calls/min with backoff on 429 errors
+- **Single-Worker Rate Limiter Preservation**: Reuses one client instance to maintain backoff state across jobs
+- **Graceful Shutdown**: Ctrl+C will save accumulated data to parquet files
 
 ## Key Parameters
 
@@ -45,7 +59,8 @@ grep "📈 Progress" logs/overnight_polygon_*.log
 - `--mode initial_load`: Fetch all historical data (first time only)
 - `--mode full_refresh`: Re-fetch everything (rarely needed)
 - `--limit N`: Limit to N tickers (for testing)
-- `--lookback-years N`: How many years of history to fetch (default: 5, free tier: 2)
+- `--lookback-years N`: How many years of history to fetch (default: 5)
+- `--target-tickers-table`: Use a plan table (e.g., `stock_fetch_plan`) instead of auto-calculation
 
 ## Rate Limits (Free Tier)
 
@@ -59,14 +74,6 @@ grep "📈 Progress" logs/overnight_polygon_*.log
 Every 50 jobs, you'll see:
 ```
 📈 Progress: 150/2402 (6.2%) | Elapsed: 0.5h | Remaining: 8.5h | Success: 145, Empty: 3, Errors: 2
-```
-
-## Database Checkpoints
-
-Every 15 minutes:
-```
-💾 Loading data to database (periodic checkpoint)...
-✅ Database updated successfully
 ```
 
 ## Final Summary
@@ -129,19 +136,20 @@ Run the same command again - it will skip already-fetched data (if using `--mode
 ## Expected Runtime
 
 - **~2,400 jobs** (from prioritized backlog with 2-year lookback)
-- **5 calls/minute** = 300 calls/hour
-- **Estimated time**: ~8 hours for full backlog
-- **Maximum time**: 9 hours (hard timeout)
+- **3-5 calls/minute** = 180-300 calls/hour (adaptive based on rate limit responses)
+- **Estimated time**: ~8-13 hours for full backlog
+- **Maximum time**: 15 hours (hard timeout)
 
-## What Happens After 9 Hours?
+## What Happens After 15 Hours?
 
 The script will:
 1. Stop accepting new jobs
 2. Finish any in-flight API calls
-3. Write all accumulated data to parquet
-4. Load all data into the database
-5. Print final summary
-6. Exit cleanly
+3. Ensure all accumulated data is written to parquet
+4. Print final summary
+5. Exit cleanly
+
+**Note**: Database loading is now a separate step. After the gatherer completes, run `update_from_parquet.py` to ingest the parquet files.
 
 ## Files Created
 

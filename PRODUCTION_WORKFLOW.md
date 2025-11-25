@@ -118,21 +118,21 @@ python main.py gather-ticker-info --tickers AAPL MSFT GOOGL
 
 ### 4. Load Data into Database
 
+**After gathering completes**, load parquet files into DuckDB:
+
 **VS Code Debug:**
+- `Load: update_from_parquet` - Load all new parquet files
 - `Load: ticker info` - Load Polygon ticker reference data
-- `Load: stocks (stock_history)` - Load stock price history
 - `Load: stock_history (direct)` - Direct loader script
 
 **Terminal:**
 ```bash
-# Load ticker info
-python main.py load-ticker-info
+# Recommended: Load all new parquet files
+python update_from_parquet.py
 
-# Load stock history
-python main.py load_stocks
-
-# Direct loader (alternative)
+# Or load specific tables
 python data_processing/load_supplementary_data.py stock_history
+python data_processing/load_ticker_info.py
 ```
 
 ---
@@ -170,9 +170,8 @@ python main.py gather-stocks-polygon --mode append --lookback-years 2
 # 3. Gather ticker info for new/missing tickers (prioritized)
 python main.py gather-ticker-info --prioritize --limit 200
 
-# 4. Load everything into database
-python main.py load_stocks
-python main.py load-ticker-info
+# 4. Load all new parquet files into database
+python update_from_parquet.py
 
 # 5. Validate database integrity
 python main.py validate
@@ -199,12 +198,13 @@ tail -f logs/stock_data_gatherer_polygon.log
 # Check for errors
 grep ERROR logs/*.log
 
-# Check progress updates
-grep "📈 Progress" logs/*.log
+# Check pipeline summary
+grep "Pipeline Summary" -A 10 logs/*.log
 ```
 
-### Database Checkpoints
-Stock gatherer writes to database every 15 minutes automatically.
+### Parquet Output
+Stock gatherer writes parquet batches continuously as data is fetched.
+Load into database with `python update_from_parquet.py` after gathering completes.
 
 ### Final Summary Example
 ```
