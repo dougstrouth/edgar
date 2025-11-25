@@ -312,7 +312,7 @@ def load_parquet_to_db(db_path: str, parquet_dir: Path, logger: logging.Logger) 
         logger.info(f"Loaded {records_loaded} total new records into stock_history table")
 
 
-def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
+def fetch_worker(job: Dict[str, Any], client: Optional[PolygonClient] = None) -> Dict[str, Any]:
     """
     Worker function to fetch data for a single ticker.
     Runs in separate process.
@@ -326,8 +326,9 @@ def fetch_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     # Create client in this process (can't share across processes)
     # Use configurable rate limit (defaults to conservative 3 calls/min; free tier allows up to 5)
     calls_per_minute = job.get('calls_per_minute', DEFAULT_CALLS_PER_MINUTE)
-    rate_limiter = PolygonRateLimiter(calls_per_minute=calls_per_minute)
-    client = PolygonClient(api_key, rate_limiter=rate_limiter)  # use default retry profile to match info gatherer
+    if client is None:
+        rate_limiter = PolygonRateLimiter(calls_per_minute=calls_per_minute)
+        client = PolygonClient(api_key, rate_limiter=rate_limiter)  # default retry profile, same as info gatherer
     
     try:
         # Fetch aggregates
@@ -677,10 +678,11 @@ def run_polygon_pipeline(
     logger.info(f"Batch size: {effective_batch_size}")
     # Removing periodic DB write interval logic per simplification request (option A)
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_worker, job): job for job in jobs}
-        
-        for future in as_completed(futures):
+    if max_workers == 1:
+        # Single-worker mode: reuse a single client to preserve rate limiter/backoff state across jobs
+        rate_limiter = PolygonRateLimiter(calls_per_minute=calls_per_minute)
+        shared_client = PolygonClient(api_key, rate_limiter=rate_limiter)
+        for job in jobs:
             # Check timeout
             elapsed_time = time.time() - pipeline_start_time
             if elapsed_time > max_runtime_seconds:
@@ -688,24 +690,25 @@ def run_polygon_pipeline(
                 logger.warning(f"   Processed {jobs_processed}/{len(jobs)} jobs before timeout")
                 logger.warning(f"   Stopping gracefully and writing accumulated data...")
                 break
-            
-            result = future.result()
+
+            result = fetch_worker(job, client=shared_client)
             jobs_processed += 1
-            
+
             # Progress reporting
             if jobs_processed % 50 == 0 or jobs_processed == len(jobs):
                 progress_pct = (jobs_processed / len(jobs)) * 100
+                elapsed_time = time.time() - pipeline_start_time
                 elapsed_hours = elapsed_time / 3600
                 remaining_hours = (max_runtime_seconds - elapsed_time) / 3600
                 logger.info(f"📈 Progress: {jobs_processed}/{len(jobs)} ({progress_pct:.1f}%) | "
                            f"Elapsed: {elapsed_hours:.1f}h | Remaining: {remaining_hours:.1f}h | "
                            f"Success: {success_count}, Empty: {empty_count}, Errors: {error_count}")
-            
+
             if result['status'] == 'success':
                 success_count += 1
                 data_batch.append(result['data'])
-                
-                # Write batch if we've accumulated enough OR if it's time for periodic DB write
+
+                # Write batch if we've accumulated enough
                 should_write_batch = len(data_batch) >= effective_batch_size
 
                 if should_write_batch:
@@ -715,7 +718,6 @@ def run_polygon_pipeline(
                     combined_df.to_parquet(filename, index=False, engine='pyarrow')
                     logger.info(f"📦 Wrote batch of {len(combined_df)} records to {filename.name} (batch_size={effective_batch_size})")
                     data_batch = []
-                    
             elif result['status'] == 'empty':
                 empty_count += 1
             else:
@@ -728,6 +730,58 @@ def run_polygon_pipeline(
                         'ticker': ticker_failed,
                         'error': str(error_msg)
                     })
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fetch_worker, job): job for job in jobs}
+            
+            for future in as_completed(futures):
+                # Check timeout
+                elapsed_time = time.time() - pipeline_start_time
+                if elapsed_time > max_runtime_seconds:
+                    logger.warning(f"⏰ Reached maximum runtime of {max_runtime_seconds / 3600:.1f} hours")
+                    logger.warning(f"   Processed {jobs_processed}/{len(jobs)} jobs before timeout")
+                    logger.warning(f"   Stopping gracefully and writing accumulated data...")
+                    break
+                
+                result = future.result()
+                jobs_processed += 1
+                
+                # Progress reporting
+                if jobs_processed % 50 == 0 or jobs_processed == len(jobs):
+                    progress_pct = (jobs_processed / len(jobs)) * 100
+                    elapsed_hours = elapsed_time / 3600
+                    remaining_hours = (max_runtime_seconds - elapsed_time) / 3600
+                    logger.info(f"📈 Progress: {jobs_processed}/{len(jobs)} ({progress_pct:.1f}%) | "
+                               f"Elapsed: {elapsed_hours:.1f}h | Remaining: {remaining_hours:.1f}h | "
+                               f"Success: {success_count}, Empty: {empty_count}, Errors: {error_count}")
+                
+                if result['status'] == 'success':
+                    success_count += 1
+                    data_batch.append(result['data'])
+                    
+                    # Write batch if we've accumulated enough OR if it's time for periodic DB write
+                    should_write_batch = len(data_batch) >= effective_batch_size
+                    
+                    if should_write_batch:
+                        combined_df = pd.concat(data_batch, ignore_index=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = parquet_dir / f"polygon_batch_{timestamp}.parquet"
+                        combined_df.to_parquet(filename, index=False, engine='pyarrow')
+                        logger.info(f"📦 Wrote batch of {len(combined_df)} records to {filename.name} (batch_size={effective_batch_size})")
+                        data_batch = []
+                        
+                elif result['status'] == 'empty':
+                    empty_count += 1
+                else:
+                    error_count += 1
+                    # Track failed ticker for potential retry
+                    ticker_failed = result.get('ticker', 'unknown')
+                    error_msg = result.get('error', 'Unknown error')
+                    if isinstance(ticker_failed, str):
+                        failed_tickers.append({
+                            'ticker': ticker_failed,
+                            'error': str(error_msg)
+                        })
     
     # Write remaining data
     if data_batch:
