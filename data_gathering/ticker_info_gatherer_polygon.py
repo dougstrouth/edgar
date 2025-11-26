@@ -43,7 +43,7 @@ from utils.config_utils import AppConfig  # noqa: E402
 from utils.logging_utils import setup_logging  # noqa: E402
 from utils.database_conn import ManagedDatabaseConnection  # noqa: E402
 from utils.polygon_client import PolygonClient, PolygonRateLimiter  # noqa: E402
-from utils.prioritizer import prioritize_tickers_for_stock_data  # noqa: E402
+from utils.prioritizer import prioritize_tickers_for_info  # noqa: E402
 from utils.untrackable import mark_untrackable, get_untrackable_tickers  # noqa: E402
 
 # Setup logging
@@ -84,18 +84,43 @@ def filter_tickers_for_info(
 def get_tickers_to_fetch(
     con: duckdb.DuckDBPyConnection,
     target_tickers: Optional[List[str]] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    use_backlog: bool = False
 ) -> List[str]:
     """Get list of tickers to fetch info for.
     
-    Note: Does NOT apply ORDER BY - ordering should be handled by prioritization.
-    If no prioritization requested, tickers will be in natural DB order.
+    Note: Does NOT apply ORDER BY when querying all tickers - ordering should be handled by prioritization.
+    If using backlog table, returns tickers in priority order from the backlog.
     """
     logger.info("Querying for tickers to fetch info...")
     
     if target_tickers:
         logger.info(f"Using provided list of {len(target_tickers)} target tickers")
         return target_tickers[:limit] if limit else target_tickers
+    
+    # Check if backlog table exists and should be used
+    if use_backlog:
+        try:
+            tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+            if 'prioritized_tickers_info_backlog' in tables:
+                count_result = con.execute("SELECT COUNT(*) FROM prioritized_tickers_info_backlog").fetchone()
+                backlog_count = count_result[0] if count_result else 0
+                
+                if backlog_count > 0:
+                    logger.info(f"✓ Found prioritized_tickers_info_backlog table with {backlog_count} tickers")
+                    query = "SELECT ticker FROM prioritized_tickers_info_backlog ORDER BY rank;"
+                    tickers_df = con.execute(query).df()
+                    all_tickers = tickers_df['ticker'].tolist()
+                    logger.info(f"Using {len(all_tickers)} tickers from backlog (pre-prioritized)")
+                    return all_tickers[:limit] if limit else all_tickers
+                else:
+                    logger.warning("prioritized_tickers_info_backlog table is empty")
+                    logger.warning("   Run 'python main.py generate_ticker_info_backlog' to create it.")
+            else:
+                logger.warning("prioritized_tickers_info_backlog table not found")
+                logger.warning("   Run 'python main.py generate_ticker_info_backlog' to create it.")
+        except Exception as e:
+            logger.warning(f"Could not query backlog table: {e}")
     
     # Get all tickers from database (no ORDER BY - let prioritization handle ordering)
     query = "SELECT DISTINCT ticker FROM tickers WHERE ticker IS NOT NULL;"
@@ -321,7 +346,9 @@ def run_polygon_ticker_info_pipeline(
     limit: Optional[int] = None,
     force_refresh: bool = False,
     prioritize: bool = False,
+    use_backlog: bool = False,
     prioritizer_lookback_days: int = 365,
+    prioritizer_weights: Optional[Dict[str, float]] = None,
 ):
     """
     Main pipeline for fetching ticker info from Polygon.io.
@@ -331,6 +358,8 @@ def run_polygon_ticker_info_pipeline(
         target_tickers: Optional list of specific tickers to fetch
         limit: Optional limit on number of tickers to process
         force_refresh: If True, fetch info even if we already have it
+        prioritize: If True, apply runtime prioritization (slower for large sets)
+        use_backlog: If True, use prioritized_tickers_info_backlog table (faster, pre-computed)
     """
     logger.info("=" * 80)
     logger.info("Starting Polygon.io Ticker Info Pipeline")
@@ -370,27 +399,32 @@ def run_polygon_ticker_info_pipeline(
             return
         
         # Get tickers to process
-        all_tickers = get_tickers_to_fetch(con, target_tickers, limit)
+        all_tickers = get_tickers_to_fetch(con, target_tickers, limit, use_backlog=use_backlog)
         
         if not all_tickers:
             logger.warning("No tickers to process")
             return
         
-        # Optional prioritization BEFORE refresh filtering (so stale tickers maintain ordering)
-        if prioritize:
+        # Optional prioritization BEFORE refresh filtering (only if not using backlog)
+        # Backlog is already prioritized, so skip runtime prioritization
+        if prioritize and not use_backlog:
             try:
-                logger.info(f"Prioritizing {len(all_tickers)} tickers using stock data heuristic (lookback {prioritizer_lookback_days}d)...")
-                prioritized_pairs = prioritize_tickers_for_stock_data(
+                weights_str = f" with custom weights" if prioritizer_weights else ""
+                logger.info(f"Prioritizing {len(all_tickers)} tickers for ticker-info gathering (lookback {prioritizer_lookback_days}d){weights_str}...")
+                prioritized_pairs = prioritize_tickers_for_info(
                     db_path=config.DB_FILE_STR,
                     tickers=all_tickers,
+                    weights=prioritizer_weights,
                     lookback_days=prioritizer_lookback_days
                 )
                 all_tickers = [t for t, _score in prioritized_pairs]
-                logger.info("Top 10 prioritized tickers:")
+                logger.info("Top 10 prioritized tickers for info gathering:")
                 for i, (t, score) in enumerate(prioritized_pairs[:10], 1):
                     logger.info(f"  {i:2}. {t:10} score={score:.4f}")
             except Exception as e:
                 logger.warning(f"Prioritization failed: {e}; proceeding unprioritized")
+        elif use_backlog:
+            logger.info("Using pre-computed backlog priorities (skipping runtime prioritization)")
 
         # Existing info and refresh logic (after potential prioritization)
         existing_info = get_existing_ticker_info(con, all_tickers)
@@ -421,7 +455,8 @@ def run_polygon_ticker_info_pipeline(
         elif before_untrackable_filter and not untrackable_tickers:
             logger.info("No untrackable tickers to skip (table empty or absent)")
         
-        logger.info(f"Will fetch info for {len(tickers_to_fetch)} tickers (prioritize={prioritize})")
+        mode_desc = "backlog" if use_backlog else ("prioritized" if prioritize else "unprioritized")
+        logger.info(f"Will fetch info for {len(tickers_to_fetch)} tickers (mode={mode_desc})")
     
     # Create jobs with db_path for failure tracking
     jobs = [
@@ -545,7 +580,12 @@ def main():
     parser.add_argument(
         '--prioritize',
         action='store_true',
-        help='Apply stock data prioritization ordering before refresh filtering'
+        help='Apply runtime stock data prioritization ordering before refresh filtering (slower for large sets)'
+    )
+    parser.add_argument(
+        '--use-backlog',
+        action='store_true',
+        help='Use pre-generated prioritized_tickers_info_backlog table (faster, run generate_ticker_info_backlog first)'
     )
     parser.add_argument(
         '--prioritizer-lookback-days',
@@ -553,8 +593,27 @@ def main():
         default=365,
         help='Lookback window (days) used by prioritizer heuristic (default: 365)'
     )
+    parser.add_argument(
+        '--prioritizer-weights',
+        type=str,
+        help='Custom prioritizer weights as comma-separated key=value pairs (e.g., xbrl_richness=0.4,key_metrics=0.3,has_stock_data=0.15,filing_activity=0.1,exchange_priority=0.05)'
+    )
     
     args = parser.parse_args()
+    
+    # Parse weights if provided
+    prioritizer_weights = None
+    if args.prioritizer_weights:
+        try:
+            prioritizer_weights = {}
+            for pair in args.prioritizer_weights.split(','):
+                key, val = pair.strip().split('=')
+                prioritizer_weights[key.strip()] = float(val.strip())
+            logger.info(f"Using custom prioritizer weights: {prioritizer_weights}")
+        except Exception as e:
+            logger.error(f"Failed to parse --prioritizer-weights: {e}")
+            logger.error("Expected format: key1=0.3,key2=0.2,...")
+            return
     
     # Load config
     config = AppConfig()
@@ -566,7 +625,9 @@ def main():
         limit=args.limit,
         force_refresh=args.force_refresh,
         prioritize=args.prioritize,
+        use_backlog=args.use_backlog,
         prioritizer_lookback_days=args.prioritizer_lookback_days,
+        prioritizer_weights=prioritizer_weights,
     )
 
 

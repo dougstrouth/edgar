@@ -15,7 +15,7 @@ class DummyConfig(AppConfig):
         self.DB_FILE = Path(':memory:')
 
 
-def fake_prioritizer(db_path: str, tickers: List[str], lookback_days: int) -> List[Tuple[str, float]]:
+def fake_prioritizer(db_path: str, tickers: List[str], weights=None, lookback_days: int = 365) -> List[Tuple[str, float]]:
     # Reverse order scoring for test determinism
     # Give highest scores to last tickers (so AAA gets lowest score)
     return [(t, len(tickers) - i) for i, t in enumerate(tickers)]
@@ -23,7 +23,7 @@ def fake_prioritizer(db_path: str, tickers: List[str], lookback_days: int) -> Li
 
 def test_prioritize_applies_order(monkeypatch, tmp_path):
     # Patch prioritizer (must patch the imported symbol in gatherer module)
-    monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.prioritize_tickers_for_stock_data', fake_prioritizer)
+    monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.prioritize_tickers_for_info', fake_prioritizer)
 
     # Minimal config pointing parquet dir to temp
     cfg = DummyConfig()
@@ -39,10 +39,17 @@ def test_prioritize_applies_order(monkeypatch, tmp_path):
     cfg.DB_FILE_STR = str(db_path)
     cfg.DB_FILE = db_path
 
+    # Mock API key
+    monkeypatch.setattr(cfg, 'get_optional_var', lambda key: 'test_api_key' if key == 'POLYGON_API_KEY' else None)
+    
     # Monkeypatch get_existing_ticker_info to return empty so all tickers selected
     monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.get_existing_ticker_info', lambda con, t: {})
     # Monkeypatch filter_tickers_for_info to passthrough
     monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.filter_tickers_for_info', lambda all_t, existing, days, force, current_time=None: all_t)
+    # Monkeypatch get_polygon_untrackable_tickers to return empty set
+    monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.get_polygon_untrackable_tickers', lambda con, expiry_days=365: set())
+    # Mock the actual fetching to avoid network calls
+    monkeypatch.setattr('data_gathering.ticker_info_gatherer_polygon.fetch_worker', lambda job, client=None: {'status': 'success', 'ticker': job['ticker'], 'data': {'ticker': job['ticker'], 'fetch_timestamp': datetime.now(timezone.utc)}})
 
     # Spy: capture first prioritized ticker line
     capture = {}

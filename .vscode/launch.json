@@ -16,6 +16,9 @@
     {"name": "Backlog: generate (default weights)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_backlog"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Backlog: generate top 1200","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_backlog","--limit","1200"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Backlog: generate custom weights","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_backlog","--weights","xbrl_richness=0.3,key_metrics=0.2,stock_data_need=0.35,filing_activity=0.15"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info Backlog: generate top 1000","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_ticker_info_backlog","--limit","1000"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info Backlog: generate top 500","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_ticker_info_backlog","--limit","500"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info Backlog: custom refresh 60d","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_ticker_info_backlog","--refresh-days","60","--limit","1000"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
 
     // ========== POLYGON STOCK DATA (PRODUCTION) ==========
     {"name": "Stocks (Polygon): Append 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","append","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
@@ -27,11 +30,14 @@
     {"name": "Stocks (Polygon): TEST - 50 tickers","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","initial_load","--limit","50","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
 
     // ========== POLYGON TICKER INFO (PRODUCTION) ==========
+    {"name": "Ticker Info (Polygon): PRODUCTION - use backlog","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--use-backlog"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Ticker Info (Polygon): PRODUCTION - prioritized","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--prioritize"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Ticker Info (Polygon): PRODUCTION - all missing","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Ticker Info (Polygon): force refresh all","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--force-refresh"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
 
     // ========== POLYGON TICKER INFO (TESTING) ==========
+    {"name": "Ticker Info (Polygon): TEST - backlog top 50","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--use-backlog","--limit","50"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Ticker Info (Polygon): TEST - backlog top 200","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--use-backlog","--limit","200"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Ticker Info (Polygon): TEST - top 50","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--prioritize","--limit","50"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Ticker Info (Polygon): TEST - top 200","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-ticker-info","--prioritize","--limit","200"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
 

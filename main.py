@@ -64,6 +64,7 @@ SCRIPTS = {
     "json_to_duckdb": SCRIPT_DIR / "data_processing/json_to_duckdb_refactored.py",
     "load": SCRIPT_DIR / "data_processing/edgar_data_loader.py",
     "generate_backlog": SCRIPT_DIR / "scripts/generate_prioritized_backlog.py",
+    "generate_ticker_info_backlog": SCRIPT_DIR / "scripts/generate_ticker_info_backlog.py",
     "stage_fetch_plan": SCRIPT_DIR / "scripts/stage_stock_fetch_plan.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
     "gather-stocks-polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
@@ -145,6 +146,7 @@ def list_steps():
     print("  feature_eng            - Run feature engineering")
     print("\nPolygon/Massive Stock Data:")
     print("  generate_backlog       - Generate prioritized ticker backlog")
+    print("  generate_ticker_info_backlog - Generate prioritized ticker-info backlog")
     print("  gather-stocks-polygon  - Gather stock price data from Polygon")
     print("  gather-ticker-info     - Gather ticker reference data from Polygon")
     print("  load-ticker-info       - Load ticker info into database")
@@ -175,7 +177,7 @@ def main():
             "core", "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
             "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect",
-            "gather-stocks-polygon", "load_stocks", "generate_backlog",
+            "gather-stocks-polygon", "load_stocks", "generate_backlog", "generate_ticker_info_backlog",
             "gather-ticker-info",
             "load-ticker-info", "list-steps"
         ],

@@ -203,6 +203,190 @@ def prioritize_tickers_for_stock_data(
             pass
 
 
+def prioritize_tickers_for_info(
+    db_path: str,
+    tickers: List[str],
+    weights: Optional[Dict[str, float]] = None,
+    lookback_days: int = 365,
+) -> List[Tuple[str, float]]:
+    """
+    Score and rank tickers for ticker-info gathering from Polygon.
+    
+    Prioritizes tickers that:
+      1. Have rich XBRL data (many unique tags) - worth getting reference data
+      2. Have key financial metrics (important companies)
+      3. Have stock price data (trading actively, worth detailed info)
+      4. Have recent filing activity (active/important companies)
+      5. Are on major exchanges (US stocks, NASDAQ/NYSE)
+    
+    Weights:
+      - xbrl_richness: Unique XBRL tag count (data quality proxy)
+      - key_metrics: Presence of core financial metrics
+      - has_stock_data: Has any stock price history (trading activity)
+      - filing_activity: Recent filing count
+      - exchange_priority: Major exchange bonus (NASDAQ/NYSE/XNYS/XNAS)
+    
+    Returns a list of tuples `(ticker, score)` sorted by score descending.
+    """
+    if weights is None:
+        weights = {
+            'xbrl_richness': 0.30,       # Rich XBRL = important company
+            'key_metrics': 0.25,         # Core metrics = worth detailed info
+            'has_stock_data': 0.20,      # Has trading data = active ticker
+            'filing_activity': 0.15,     # Recent filers = important
+            'exchange_priority': 0.10    # Major exchange = higher quality
+        }
+    
+    # Defensive normalization
+    total_w = sum(weights.values())
+    if total_w <= 0:
+        raise ValueError("weights must sum to > 0")
+    weights = {k: v / total_w for k, v in weights.items()}
+    
+    scores: Dict[str, float] = {t: 0.0 for t in tickers}
+    if not tickers:
+        return []
+    
+    try:
+        con = duckdb.connect(database=db_path, read_only=True)
+    except Exception:
+        return [(t, 0.0) for t in tickers]
+    
+    try:
+        # Key financial metrics to check for
+        key_metric_patterns = [
+            'Assets', 'Liabilities', 'StockholdersEquity',
+            'Revenue', 'NetIncome', 'OperatingIncome',
+            'CashAndCashEquivalents', 'EarningsPerShare'
+        ]
+        
+        # Major US exchanges (Polygon uses these codes)
+        major_exchanges = {'XNAS', 'XNYS', 'NASDAQ', 'NYSE', 'ARCX', 'BATS'}
+        
+        # Collect metrics for each ticker
+        xbrl_tag_counts = {}
+        key_metrics_counts = {}
+        has_stock_data_flags = {}
+        filing_counts = {}
+        exchange_scores = {}
+        
+        lookback_threshold = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).date()
+        
+        for t in tickers:
+            try:
+                row = con.execute("SELECT cik FROM tickers WHERE ticker = ? LIMIT 1;", [t]).fetchone()
+                cik = row[0] if row else None
+            except Exception:
+                cik = None
+            
+            # Default values
+            xbrl_tag_counts[t] = 0
+            key_metrics_counts[t] = 0
+            has_stock_data_flags[t] = 0
+            filing_counts[t] = 0
+            exchange_scores[t] = 0.0
+            
+            if cik:
+                # XBRL richness: count unique tags
+                try:
+                    r = con.execute(
+                        "SELECT COUNT(DISTINCT tag_name) FROM xbrl_facts WHERE cik = ?;",
+                        [cik]
+                    ).fetchone()
+                    xbrl_tag_counts[t] = int(r[0]) if r and r[0] else 0
+                except Exception:
+                    pass
+                
+                # Key metrics presence
+                try:
+                    key_count = 0
+                    for metric in key_metric_patterns:
+                        r = con.execute(
+                            "SELECT COUNT(*) FROM xbrl_facts WHERE cik = ? AND tag_name LIKE ? LIMIT 1;",
+                            [cik, f'%{metric}%']
+                        ).fetchone()
+                        if r and r[0] > 0:
+                            key_count += 1
+                    key_metrics_counts[t] = key_count
+                except Exception:
+                    pass
+                
+                # Filing activity
+                try:
+                    r = con.execute(
+                        "SELECT COUNT(*) FROM filings WHERE cik = ? AND filing_date >= ?;",
+                        [cik, lookback_threshold]
+                    ).fetchone()
+                    filing_counts[t] = int(r[0]) if r else 0
+                except Exception:
+                    pass
+            
+            # Has stock data (any history at all)
+            try:
+                r = con.execute(
+                    "SELECT COUNT(*) FROM stock_history WHERE ticker = ? LIMIT 1;",
+                    [t]
+                ).fetchone()
+                has_stock_data_flags[t] = 1 if (r and r[0] and r[0] > 0) else 0
+            except Exception:
+                pass
+            
+            # Exchange priority (check updated_ticker_info if exists)
+            try:
+                # Also check normalized ticker (hyphen -> period)
+                normalized_ticker = t.replace('-', '.')
+                r = con.execute(
+                    "SELECT primary_exchange FROM updated_ticker_info WHERE ticker IN (?, ?) LIMIT 1;",
+                    [t, normalized_ticker]
+                ).fetchone()
+                if r and r[0]:
+                    exchange = str(r[0]).upper()
+                    if exchange in major_exchanges:
+                        exchange_scores[t] = 1.0
+                    else:
+                        exchange_scores[t] = 0.3  # Other exchanges get partial credit
+            except Exception:
+                pass
+        
+        # Normalize metrics
+        xbrl_vals = [float(v) for v in xbrl_tag_counts.values()]
+        key_vals = [float(v) for v in key_metrics_counts.values()]
+        filing_vals = [float(v) for v in filing_counts.values()]
+        stock_vals = [float(v) for v in has_stock_data_flags.values()]
+        exchange_vals = [float(v) for v in exchange_scores.values()]
+        
+        max_xbrl = _safe_max(xbrl_vals)
+        max_key = _safe_max(key_vals)
+        max_filing = _safe_max(filing_vals)
+        max_stock = _safe_max(stock_vals)
+        max_exchange = _safe_max(exchange_vals)
+        
+        for t in tickers:
+            xbrl_norm = (xbrl_tag_counts[t] / max_xbrl) if max_xbrl else 0.0
+            key_norm = (key_metrics_counts[t] / max_key) if max_key else 0.0
+            filing_norm = (filing_counts[t] / max_filing) if max_filing else 0.0
+            stock_norm = (has_stock_data_flags[t] / max_stock) if max_stock else 0.0
+            exchange_norm = (exchange_scores[t] / max_exchange) if max_exchange else 0.0
+            
+            score = (
+                weights['xbrl_richness'] * xbrl_norm +
+                weights['key_metrics'] * key_norm +
+                weights['has_stock_data'] * stock_norm +
+                weights['filing_activity'] * filing_norm +
+                weights['exchange_priority'] * exchange_norm
+            )
+            scores[t] = float(score)
+        
+        # Build sorted list
+        sorted_list = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        return sorted_list
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 def prioritize_tickers_hybrid(
     db_path: str,
     tickers: List[str],
