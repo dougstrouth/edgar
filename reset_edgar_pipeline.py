@@ -44,7 +44,6 @@ def reset_edgar_pipeline(config: AppConfig, logger):
         'stock_fetch_plan',
         'updated_ticker_info',
         'yf_fetch_status',
-        'massive_tickers',
         'downloaded_archives'  # Keep track of what we've downloaded
     }
     

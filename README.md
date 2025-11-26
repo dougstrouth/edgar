@@ -149,6 +149,22 @@ con.close()
 PY
 ```
 
+## Pipeline Steps (Quick Guide)
+
+This section summarizes common orchestrator steps and how they differ.
+
+- `gather-stocks-polygon`: Fetch OHLCV stock data from Massive/Polygon (writes Parquet only)
+- `load_stocks`: Load `stock_history` Parquet into DuckDB (incremental upsert)
+- `gather-ticker-info`: Fetch official ticker reference data from Massive/Polygon (writes Parquet)
+- `load-ticker-info`: Load ticker reference Parquet into DuckDB
+- `enrich-tickers`: Enrich local `massive_tickers` universe (active-only or include-delisted). Prepares/curates the ticker set and attributes; complements `gather-ticker-info` which fetches official reference data from the API.
+
+Notes on naming and aliases:
+- Launch configs may show friendly names, but the orchestrator recognizes hyphenated keys (e.g., `gather-stocks-polygon`, `enrich-tickers`). Aliases like `gather_stocks_polygon` exist in `main.py` for convenience; prefer the hyphenated form for consistency.
+
+Validation additions:
+- The database validator now includes `stock_history` checks: table/columns existence, `(ticker,date)` duplicates, non-null required fields, non-negative price/volume ranges, and a logical `high >= low` check.
+
 **Other Commands:**
 ```bash
 # Run feature engineering scripts
@@ -163,7 +179,7 @@ python main.py cleanup --all
 
 ## Database Schema
 
-For a detailed description of all database tables, columns, and their relationships, please see the [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
+For a detailed description of all database tables, columns, and their relationships, see [DATA_DICTIONARY.md](DATA_DICTIONARY.md). For a concise overview of table-to-table relationships and validation implications, see [DATABASE_RELATIONSHIPS.md](DATABASE_RELATIONSHIPS.md).
 
 ## Massive.com Quick Check
 

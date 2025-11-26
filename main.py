@@ -66,15 +66,8 @@ SCRIPTS = {
     "generate_backlog": SCRIPT_DIR / "scripts/generate_prioritized_backlog.py",
     "stage_fetch_plan": SCRIPT_DIR / "scripts/stage_stock_fetch_plan.py",
     "gather_stocks": SCRIPT_DIR / "data_gathering/stock_data_gatherer.py",
-    "gather_stocks_polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
     "gather-stocks-polygon": SCRIPT_DIR / "data_gathering/stock_data_gatherer_polygon.py",
-    "enrich_tickers": SCRIPT_DIR / "data_gathering/ticker_enrichment_massive.py",
-    "enrich-tickers": SCRIPT_DIR / "data_gathering/ticker_enrichment_massive.py",
-    "gather_ticker_info": SCRIPT_DIR / "data_gathering/ticker_info_gatherer_polygon.py",
     "gather-ticker-info": SCRIPT_DIR / "data_gathering/ticker_info_gatherer_polygon.py",
-    "gather_info": SCRIPT_DIR / "data_gathering/stock_info_gatherer.py",
-    "load_info": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
-    "load_ticker_info": SCRIPT_DIR / "data_processing/load_ticker_info.py",
     "load-ticker-info": SCRIPT_DIR / "data_processing/load_ticker_info.py",
     "gather_macro": SCRIPT_DIR / "data_gathering/macro_data_gatherer.py",
     "load_macro": SCRIPT_DIR / "data_processing/load_supplementary_data.py",
@@ -155,7 +148,7 @@ def list_steps():
     print("  gather-stocks-polygon  - Gather stock price data from Polygon")
     print("  gather-ticker-info     - Gather ticker reference data from Polygon")
     print("  load-ticker-info       - Load ticker info into database")
-    print("  enrich-tickers         - Enrich ticker metadata")
+    # Enrichment deprecated: use gather-ticker-info + load-ticker-info
     print("\nYFinance Data (Legacy):")
     print("  gather_info            - Gather stock info from YFinance")
     print("  load_info              - Load YFinance info into database")
@@ -180,11 +173,11 @@ def main():
         default="all",
         choices=[
             "core", "all", "fetch", "parse-to-parquet", "load", "summarize", "validate", "cleanup", "feature_eng",
-            "gather_info", "load_info", "gather_macro", "load_macro",
+            "gather_macro", "load_macro",
             "gather_market_risk", "load_market_risk", "investigate_orphans", "inspect",
-            "gather_stocks_polygon", "gather-stocks-polygon", "load_stocks", "generate_backlog",
-            "enrich_tickers", "enrich-tickers", "gather_ticker_info", "gather-ticker-info",
-            "load_ticker_info", "load-ticker-info", "list-steps"
+            "gather-stocks-polygon", "load_stocks", "generate_backlog",
+            "gather-ticker-info",
+            "load-ticker-info", "list-steps"
         ],
         help="The pipeline step to run. 'all' runs every step in sequence. Default is 'all'. Use 'list-steps' to see all available steps."
     )
@@ -278,8 +271,7 @@ def main():
         final_args = remaining_args
         if script_key == "load_macro":
             final_args = ["macro_economic_data"] + remaining_args
-        elif script_key == "load_info":
-            final_args = ["yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"] + remaining_args
+        # removed legacy YF load_info alias
         elif script_key == "load_market_risk":
             final_args = ["market_risk_factors"] + remaining_args
         elif script_key == "load_stocks":

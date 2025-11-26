@@ -18,9 +18,9 @@
     {"name": "Backlog: generate custom weights","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["generate_backlog","--weights","xbrl_richness=0.3,key_metrics=0.2,stock_data_need=0.35,filing_activity=0.15"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
 
     // ========== POLYGON STOCK DATA (PRODUCTION) ==========
-    {"name": "Stocks (Polygon): PRODUCTION - append 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","append","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
-    {"name": "Stocks (Polygon): initial full 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","initial_load","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
-    {"name": "Stocks (Polygon): full refresh 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","full_refresh","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Stocks (Polygon): Append 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","append","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Stocks (Polygon): Initial load 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","initial_load","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    {"name": "Stocks (Polygon): Full refresh 2yr","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","full_refresh","--lookback-years","2"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     
     // ========== POLYGON STOCK DATA (TESTING) ==========
     {"name": "Stocks (Polygon): TEST - 10 tickers","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather-stocks-polygon","--mode","append","--lookback-years","2","--limit","10"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
@@ -41,8 +41,7 @@
     {"name": "Load: stock_history (direct)","type": "python","request": "launch","program": "${workspaceFolder}/data_processing/load_supplementary_data.py","args": ["stock_history"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
 
     // ========== TICKER ENRICHMENT ==========
-    {"name": "Enrich: massive_tickers (active only)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["enrich-tickers","--active-only"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
-    {"name": "Enrich: massive_tickers (include delisted)","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["enrich-tickers","--include-delisted"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
+    // Enrichment deprecated: use gather-ticker-info + load-ticker-info
 
     // ========== MACRO & MARKET DATA ==========
     {"name": "Macro: gather","type": "python","request": "launch","program": "${workspaceFolder}/main.py","args": ["gather_macro"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
