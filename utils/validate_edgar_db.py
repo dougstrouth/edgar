@@ -279,7 +279,23 @@ def check_stock_history_validations(con: duckdb.DuckDBPyConnection, logger: logg
             # Count number of distinct (ticker,date) missing in the window compared to tickers list
             # Build a small query that reports if any ticker has zero rows in the window
             query = f"SELECT COUNT(*) as count FROM (SELECT t.ticker FROM tickers t LEFT JOIN (SELECT DISTINCT ticker FROM {table_name} WHERE date BETWEEN '{start_dt}' AND '{end_dt}') s ON t.ticker = s.ticker WHERE s.ticker IS NULL);"
-            results.append(run_validation_query(con, query, f"{table_name}: Tickers missing recent data (last 7 days)", logger, warning_threshold=100))
+            # Allow configuration of warning threshold via .env using AppConfig
+            try:
+                cfg = AppConfig(calling_script_path=Path(__file__))
+                threshold = cfg.get_optional_int("STOCK_HISTORY_RECENT_MISSING_TICKERS_THRESHOLD", 100)
+            except Exception:
+                threshold = 100
+            # If threshold is negative, treat as disabled (no warning)
+            warn_threshold = None if (threshold is not None and threshold < 0) else threshold
+            results.append(
+                run_validation_query(
+                    con,
+                    query,
+                    f"{table_name}: Tickers missing recent data (last 7 days)",
+                    logger,
+                    warning_threshold=warn_threshold,
+                )
+            )
         except Exception:
             # Do not fail validation if date arithmetic isn't supported in the DB environment
             logger.debug("Skipping recent continuity check due to date arithmetic error.")
