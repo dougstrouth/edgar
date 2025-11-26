@@ -2,6 +2,8 @@
 
 This document provides a detailed description of the database schema used in the EDGAR Analytics project. The database stores structured data parsed from SEC EDGAR bulk files and supplementary stock market data from Yahoo Finance.
 
+> NOTE: A programmatically generated data dictionary is available in `DATA_DICTIONARY_GENERATED.md` (generated from the active DuckDB). Use that file as the authoritative, machine-produced schema snapshot.
+
 ## Database Engine
 
 *   **Type**: DuckDB
