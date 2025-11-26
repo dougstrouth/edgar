@@ -217,6 +217,27 @@ Migration Note:
 - Deprecated variables removed: `POLYGON_STOCK_BATCH_SIZE`, `POLYGON_STOCK_DB_WRITE_INTERVAL_SECONDS`, `POLYGON_INFO_BATCH_SIZE`.
 - Replace any prior references with the single `POLYGON_BATCH_SIZE` variable. Leaving old vars in `.env` has no effect.
 
+## Local Schema Tasks
+
+The repository includes a local runner to regenerate the programmatic data dictionary, refresh the test database, populate AI-friendly unique-value tables, and run unit tests. This is useful for developer workflows where CI does not have access to your production DuckDB file.
+
+Quick usage (preferred, uses `.env`):
+```bash
+python scripts/run_local_schema_tasks.py
+```
+
+Explicit paths and forced refresh:
+```bash
+python scripts/run_local_schema_tasks.py --db /path/to/edgar_analytics.duckdb --test-db /path/to/edgar_analytics_test.duckdb --force
+```
+
+What it does:
+- Regenerates `DATA_DICTIONARY_GENERATED.md` from the provided `DB_FILE`.
+- Creates or refreshes the test DB and populates `ai_unique_values` (and per-source partition tables).
+- Runs `pytest` to execute unit tests.
+
+There is also a VS Code launch profile `Local: schema tasks runner` (in `.vscode/launch.json`) that invokes the same script using your workspace `.env`.
+
 ## VS Code Debugging
 
 Launch profiles are included in `.vscode/launch.json`. Ensure your `.env` is present at the workspace root; VS Code will honor it via the project's config loader. Useful entries:

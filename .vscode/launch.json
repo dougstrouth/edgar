@@ -69,5 +69,6 @@
     // ========== TESTING ==========
     {"name": "Pytest: current file","type": "python","request": "launch","module": "pytest","args": ["${file}"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"},
     {"name": "Pytest: all tests","type": "python","request": "launch","module": "pytest","args": ["-v"],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"}
+    ,{"name": "Local: schema tasks runner","type": "python","request": "launch","program": "${workspaceFolder}/scripts/run_local_schema_tasks.py","args": [],"console": "integratedTerminal","envFile": "${workspaceFolder}/.env"}
   ]
 }
