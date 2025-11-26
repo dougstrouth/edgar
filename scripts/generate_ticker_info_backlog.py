@@ -71,15 +71,15 @@ def parse_weights(raw: str | None) -> Dict[str, float]:
             out[k] = float(v)
         except ValueError:
             raise ValueError(f"Weight value for '{k}' must be numeric, got '{v}'.")
-    # Normalize
+    # Fill any missing with defaults BEFORE normalizing
+    for k in DEFAULT_WEIGHTS:
+        if k not in out:
+            out[k] = DEFAULT_WEIGHTS[k]
+    # Normalize all weights together
     total = sum(out.values())
     if total <= 0:
         raise ValueError("Weights must sum to > 0")
     out = {k: v / total for k, v in out.items()}
-    # Fill any missing with normalized defaults
-    for k in DEFAULT_WEIGHTS:
-        if k not in out:
-            out[k] = DEFAULT_WEIGHTS[k] / sum(DEFAULT_WEIGHTS.values())
     return out
 
 

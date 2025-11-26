@@ -63,7 +63,7 @@ class AppConfig:
                     self.PROJECT_ROOT = self.PROJECT_ROOT.parent
                     self.env_file_path = parent_env_path
                 else:
-                    config_logger.warning(f".env file not found in {script_dir} or {script_dir.parent}")
+                    config_logger.warning(f".env file not found in {self.PROJECT_ROOT} or {self.PROJECT_ROOT.parent}")
                     self.env_file_path = None # Explicitly mark as not found
         else:
             # If no script path given, check CWD then parent
@@ -92,8 +92,8 @@ class AppConfig:
             db_file_str = os.environ['DB_FILE']
             self.SEC_USER_AGENT: str = os.environ['SEC_USER_AGENT']
 
-            self.DOWNLOAD_DIR: Path = Path(download_dir_str).resolve()
-            self.DB_FILE: Path = Path(db_file_str).resolve()
+            self.DOWNLOAD_DIR: Path = Path(download_dir_str).expanduser().resolve()
+            self.DB_FILE: Path = Path(db_file_str).expanduser().resolve()
             self.DB_FILE_STR: str = str(self.DB_FILE) # Convenience string version
 
             # Create directories if they don't exist (optional, could be handled by scripts)
