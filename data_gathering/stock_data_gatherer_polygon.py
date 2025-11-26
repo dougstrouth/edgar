@@ -547,13 +547,36 @@ def run_polygon_pipeline(
                 logger.critical("Database connection failed when reading plan table for job creation.")
                 return
             try:
+                # Optional freshness skip: if we already have recent coverage, skip
+                freshness_days = config.get_optional_int("STOCK_HISTORY_FRESHNESS_WINDOW_DAYS", 7) or 7
+                try:
+                    recent_rows = con_plan.execute(
+                        f"""
+                        WITH recent AS (
+                            SELECT DISTINCT ticker FROM stock_history 
+                            WHERE date >= (CURRENT_DATE - INTERVAL {freshness_days} DAY)
+                        )
+                        SELECT p.ticker 
+                        FROM {plan_table} p
+                        LEFT JOIN recent r ON r.ticker = p.ticker
+                        WHERE r.ticker IS NOT NULL
+                        GROUP BY p.ticker
+                        """
+                    ).fetchall()
+                    recently_covered = {r[0] for r in recent_rows}
+                except Exception:
+                    recently_covered = set()
+
+                # Filter plan table by the limited ticker list, excluding recently covered
                 # Filter plan table by the limited ticker list
-                ticker_list = ','.join(f"'{t}'" for t in tickers)
-                rows = con_plan.execute(f"SELECT ticker, start_date, end_date FROM {plan_table} WHERE ticker IN ({ticker_list}) ORDER BY rank").fetchall()
+                ticker_list = ','.join(f"'{t}'" for t in tickers if t not in recently_covered)
+                rows = con_plan.execute(
+                    f"SELECT ticker, start_date, end_date FROM {plan_table} WHERE ticker IN ({ticker_list}) ORDER BY rank"
+                ).fetchall()
             except Exception as e:
                 logger.critical(f"Failed to read plan rows: {e}")
-                logger.critical(f"Expected columns: ticker, start_date, end_date, rank")
-                logger.critical(f"Hint: Regenerate the backlog with 'python main.py generate_backlog'")
+                logger.critical("Expected columns: ticker, start_date, end_date, rank")
+                logger.critical("Hint: Regenerate the backlog with 'python main.py generate_backlog'")
                 return
 
             # Determine clamp window (may override lookback_years if env var provided)
@@ -565,9 +588,12 @@ def run_polygon_pipeline(
             for ticker, sdt, edt in rows:
                 # Normalize types to date
                 def to_date(val):
-                    if val is None: return None
-                    if isinstance(val, date): return val
-                    if isinstance(val, datetime): return val.date()
+                    if val is None:
+                        return None
+                    if isinstance(val, date):
+                        return val
+                    if isinstance(val, datetime):
+                        return val.date()
                     try:
                         return datetime.fromisoformat(str(val)).date()
                     except Exception:
@@ -691,7 +717,7 @@ def run_polygon_pipeline(
             if elapsed_time > max_runtime_seconds:
                 logger.warning(f"⏰ Reached maximum runtime of {max_runtime_seconds / 3600:.1f} hours")
                 logger.warning(f"   Processed {jobs_processed}/{len(jobs)} jobs before timeout")
-                logger.warning(f"   Stopping gracefully and writing accumulated data...")
+                logger.warning("   Stopping gracefully and writing accumulated data...")
                 break
 
             result = fetch_worker(job, client=shared_client)
@@ -743,7 +769,7 @@ def run_polygon_pipeline(
                 if elapsed_time > max_runtime_seconds:
                     logger.warning(f"⏰ Reached maximum runtime of {max_runtime_seconds / 3600:.1f} hours")
                     logger.warning(f"   Processed {jobs_processed}/{len(jobs)} jobs before timeout")
-                    logger.warning(f"   Stopping gracefully and writing accumulated data...")
+                    logger.warning("   Stopping gracefully and writing accumulated data...")
                     break
                 
                 result = future.result()

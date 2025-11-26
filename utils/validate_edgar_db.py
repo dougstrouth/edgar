@@ -41,15 +41,10 @@ except ImportError as e:
 EDGAR_TABLES = ["companies", "tickers", "former_names", "filings", "xbrl_tags", "xbrl_facts", "xbrl_facts_orphaned"]
 # Tables loaded by stock_data_gatherer.py
 STOCK_TABLES = ["stock_history", "stock_fetch_errors"]
-# Tables loaded by stock_info_gatherer.py
-YF_INFO_TABLES = [
-    "yf_profile_metrics", "yf_stock_actions", "yf_major_holders",
-    "yf_recommendations", "yf_info_fetch_errors", "yf_income_statement", "yf_balance_sheet", "yf_cash_flow"
-]
 # Tables from macro/market sources
 ECONOMIC_TABLES = ["macro_economic_data", "market_risk_factors"]
 
-ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + YF_INFO_TABLES + ECONOMIC_TABLES
+ALL_TABLES = EDGAR_TABLES + STOCK_TABLES + ECONOMIC_TABLES
 
 # Additional supplementary tables used by gatherers/status tracking
 SUPPLEMENTARY_OPTIONAL = [
@@ -169,41 +164,15 @@ def check_xbrl_facts_validations(con: duckdb.DuckDBPyConnection, logger: logging
 
     return results
 
-def check_yf_data_validations(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
-    """Runs various checks on the yfinance supplementary tables."""
-    results = []
-    logger.info("\n=== Checking Yahoo Finance Data Integrity ===")
-
-    db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
-
-    # Null checks on PKs / Essential Columns
-    if 'yf_profile_metrics' in db_tables:
-        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_profile_metrics: NULL PK/Timestamp Check", logger, expect_zero=True))
-    if 'yf_stock_actions' in db_tables:
-        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_stock_actions WHERE ticker IS NULL OR action_date IS NULL OR action_type IS NULL;", "yf_stock_actions: NULL PK Check", logger, expect_zero=True))
-    if 'yf_major_holders' in db_tables:
-        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE ticker IS NULL OR fetch_timestamp IS NULL;", "yf_major_holders: NULL PK/Timestamp Check", logger, expect_zero=True))
-    if 'yf_recommendations' in db_tables:
-        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_recommendations WHERE ticker IS NULL OR recommendation_timestamp IS NULL OR firm IS NULL;", "yf_recommendations: NULL PK Check", logger, expect_zero=True))
-
-    # Data Range / Consistency Checks
-    if 'yf_profile_metrics' in db_tables:
-        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_profile_metrics WHERE cik IS NOT NULL AND LENGTH(cik) != 10;", "yf_profile_metrics: Invalid CIK format", logger, expect_zero=True))
-    if 'yf_major_holders' in db_tables:
-        results.append(run_validation_query(con, "SELECT COUNT(*) as count FROM yf_major_holders WHERE pct_insiders < 0 OR pct_insiders > 1 OR pct_institutions < 0 OR pct_institutions > 1;", "yf_major_holders: Invalid Percentage Range", logger, expect_zero=True))
-    if 'yf_stock_actions' in db_tables:
-        results.append(run_validation_query(con, "SELECT DISTINCT action_type FROM yf_stock_actions;", "yf_stock_actions: Distinct action_type", logger))
-
-    return results
+# Removed YF data validations per project scope change
 
 def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Logger) -> List[Tuple[Optional[str], Optional[int], str]]:
-    """Checks if tickers in stock/yf tables exist in the main 'tickers' table."""
+    """Checks if tickers in stock tables exist in the main 'tickers' table."""
     results = []
     db_tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
     logger.info("\n=== Checking Ticker Consistency Across Tables (Expecting 0 violations) ===")
-    yf_tables_with_ticker = [
-        "stock_history", # From stock_data_gatherer
-        "yf_profile_metrics", "yf_stock_actions", "yf_major_holders", "yf_recommendations"
+    stock_tables_with_ticker = [
+        "stock_history"
     ]
 
     # Build a unified ticker source that includes authoritative EDGAR tickers
@@ -214,7 +183,7 @@ def check_ticker_consistency(con: duckdb.DuckDBPyConnection, logger: logging.Log
             "(SELECT DISTINCT ticker FROM tickers "
             "UNION SELECT DISTINCT ticker FROM massive_tickers)"
         )
-    for table in yf_tables_with_ticker:
+    for table in stock_tables_with_ticker:
         if table.lower() in db_tables:
             query = f"""
                 SELECT COUNT(t1.ticker) as count
@@ -276,9 +245,30 @@ def check_stock_history_validations(con: duckdb.DuckDBPyConnection, logger: logg
             import datetime as _dt
             end_dt = _dt.date.today()
             start_dt = end_dt - _dt.timedelta(days=7)
-            # Count number of distinct (ticker,date) missing in the window compared to tickers list
-            # Build a small query that reports if any ticker has zero rows in the window
-            query = f"SELECT COUNT(*) as count FROM (SELECT t.ticker FROM tickers t LEFT JOIN (SELECT DISTINCT ticker FROM {table_name} WHERE date BETWEEN '{start_dt}' AND '{end_dt}') s ON t.ticker = s.ticker WHERE s.ticker IS NULL);"
+            # Define the prioritized universe: tickers from the backlog prioritization
+            # minus shared Polygon 404 list. If backlog table is absent, fall back to all tickers minus 404.
+            prioritized_universe_cte = f"""
+                WITH backlog AS (
+                    SELECT DISTINCT ticker FROM prioritized_tickers_stock_backlog
+                ),
+                polygon_untrackable AS (
+                    SELECT DISTINCT ticker FROM polygon_untrackable_tickers
+                    WHERE last_failed_timestamp >= (CURRENT_DATE - INTERVAL 365 DAY)
+                ),
+                prioritized AS (
+                    SELECT DISTINCT b.ticker
+                    FROM backlog b
+                    LEFT JOIN polygon_untrackable pu ON pu.ticker = b.ticker
+                    WHERE pu.ticker IS NULL
+                ),
+                recent_stock AS (
+                    SELECT DISTINCT ticker
+                    FROM {table_name}
+                    WHERE date BETWEEN DATE '{start_dt}' AND DATE '{end_dt}'
+                )
+            """
+            # Count prioritized tickers missing recent stock history
+            query = prioritized_universe_cte + "SELECT COUNT(*) AS count FROM prioritized p LEFT JOIN recent_stock rs ON p.ticker = rs.ticker WHERE rs.ticker IS NULL;"
             # Allow configuration of warning threshold via .env using AppConfig
             try:
                 cfg = AppConfig(calling_script_path=Path(__file__))
@@ -291,7 +281,7 @@ def check_stock_history_validations(con: duckdb.DuckDBPyConnection, logger: logg
                 run_validation_query(
                     con,
                     query,
-                    f"{table_name}: Tickers missing recent data (last 7 days)",
+                    f"{table_name}: Prioritized tickers missing recent data (last 7 days, excluding 404, info<30d)",
                     logger,
                     warning_threshold=warn_threshold,
                 )
@@ -359,7 +349,7 @@ def run_all_checks(con: duckdb.DuckDBPyConnection, logger: logging.Logger):
     all_results.extend(check_edgar_fk_integrity(con, logger))
     all_results.extend(check_orphaned_facts(con, logger))
     all_results.extend(check_xbrl_facts_validations(con, logger))
-    all_results.extend(check_yf_data_validations(con, logger)) # Add new YF checks
+    # Removed YF checks per scope change
     all_results.extend(check_table_uniqueness(con, logger))
     all_results.extend(check_market_risk_validations(con, logger))
     all_results.extend(check_ticker_consistency(con, logger)) # Add new consistency check
