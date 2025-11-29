@@ -47,10 +47,10 @@ try:
     config = AppConfig(calling_script_path=Path(__file__))
     db_file = config.DB_FILE_STR
     print(f"Connecting to database: {db_file}")
-    con = duckdb.connect(database=db_file, read_only=True)
     
-    schema = get_db_schema(con)
-    markdown_content = format_schema_as_markdown(schema)
+    with duckdb.connect(database=db_file, read_only=True) as con:
+        schema = get_db_schema(con)
+        markdown_content = format_schema_as_markdown(schema)
     
     with open("/Users/dougstrouth/github_noicloud/edgar/DATA_DICTIONARY.md", "w") as f:
         f.write(markdown_content)

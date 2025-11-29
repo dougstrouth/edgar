@@ -20,11 +20,11 @@ try:
     config = AppConfig(calling_script_path=Path(__file__))
     db_file = config.DB_FILE_STR
     print(f"Connecting to database: {db_file}")
-    con = duckdb.connect(database=db_file, read_only=False)
     
-    print("Clearing the downloaded_archives table...")
-    con.execute("DELETE FROM downloaded_archives;")
-    print("Table cleared.")
+    with duckdb.connect(database=db_file, read_only=False) as con:
+        print("Clearing the downloaded_archives table...")
+        con.execute("DELETE FROM downloaded_archives;")
+        print("Table cleared.")
 
 except Exception as e:
     print(f"An error occurred: {e}", file=sys.stderr)

@@ -21,11 +21,11 @@ from utils.config_utils import AppConfig
 def validate_joins():
     """Validate all critical joins in the database."""
     config = AppConfig(calling_script_path=Path(__file__))
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
     
-    print("="*80)
-    print("DATABASE JOIN VALIDATION REPORT")
-    print("="*80)
+    with duckdb.connect(str(config.DB_FILE), read_only=True) as con:
+        print("="*80)
+        print("DATABASE JOIN VALIDATION REPORT")
+        print("="*80)
     
     # 1. Check CIK consistency
     print("\n1. CIK FORMAT CONSISTENCY")
@@ -186,11 +186,9 @@ def validate_joins():
     else:
         print(f"  ✓ All {total_ciks} companies have XBRL data loaded!")
     
-    print("\n" + "="*80)
-    print("VALIDATION COMPLETE")
-    print("="*80)
-    
-    con.close()
+        print("\n" + "="*80)
+        print("VALIDATION COMPLETE")
+        print("="*80)
 
 if __name__ == "__main__":
     validate_joins()

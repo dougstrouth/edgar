@@ -223,39 +223,37 @@ def main() -> None:
     logger.info(f"Force refresh: {args.force_refresh}")
     logger.info(f"Row limit: {args.limit if args.limit else 'ALL'}")
 
-    con = duckdb.connect(db_path, read_only=False)
-    
-    # Check if polygon_untrackable_tickers table exists
-    tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
-    has_untrackable = 'polygon_untrackable_tickers' in tables
-    
-    if has_untrackable:
-        result = con.execute("SELECT COUNT(*) FROM polygon_untrackable_tickers WHERE last_failed_timestamp >= (CURRENT_DATE - INTERVAL 365 DAY)").fetchone()
-        untrackable_count = result[0] if result else 0
-        logger.info(f"Found {untrackable_count} untrackable tickers (365d window) to exclude")
-    else:
-        logger.info("polygon_untrackable_tickers table not found - will include all tickers")
-    
-    query = build_query(weights, args.refresh_days, args.force_refresh, exclude_untrackable=has_untrackable)
-    logger.info("Executing ticker-info prioritization query...")
-    df = con.execute(query).df()
-    logger.info(f"Scored {len(df)} candidate tickers for info gathering.")
+    with duckdb.connect(db_path, read_only=False) as con:
+        # Check if polygon_untrackable_tickers table exists
+        tables = {row[0].lower() for row in con.execute("SHOW TABLES;").fetchall()}
+        has_untrackable = 'polygon_untrackable_tickers' in tables
+        
+        if has_untrackable:
+            result = con.execute("SELECT COUNT(*) FROM polygon_untrackable_tickers WHERE last_failed_timestamp >= (CURRENT_DATE - INTERVAL 365 DAY)").fetchone()
+            untrackable_count = result[0] if result else 0
+            logger.info(f"Found {untrackable_count} untrackable tickers (365d window) to exclude")
+        else:
+            logger.info("polygon_untrackable_tickers table not found - will include all tickers")
+        
+        query = build_query(weights, args.refresh_days, args.force_refresh, exclude_untrackable=has_untrackable)
+        logger.info("Executing ticker-info prioritization query...")
+        df = con.execute(query).df()
+        logger.info(f"Scored {len(df)} candidate tickers for info gathering.")
 
-    # Apply limit and persist
-    limited_df = df.head(args.limit).copy() if args.limit else df.copy()
-    con.execute("DROP TABLE IF EXISTS prioritized_tickers_info_backlog")
-    con.register("limited_df", limited_df)
-    con.execute("CREATE TABLE prioritized_tickers_info_backlog AS SELECT * FROM limited_df")
-    saved_row = con.execute("SELECT COUNT(*) FROM prioritized_tickers_info_backlog").fetchone()
-    saved = saved_row[0] if saved_row else 0
-    logger.info(f"Persisted {saved} rows to prioritized_tickers_info_backlog.")
+        # Apply limit and persist
+        limited_df = df.head(args.limit).copy() if args.limit else df.copy()
+        con.execute("DROP TABLE IF EXISTS prioritized_tickers_info_backlog")
+        con.register("limited_df", limited_df)
+        con.execute("CREATE TABLE prioritized_tickers_info_backlog AS SELECT * FROM limited_df")
+        saved_row = con.execute("SELECT COUNT(*) FROM prioritized_tickers_info_backlog").fetchone()
+        saved = saved_row[0] if saved_row else 0
+        logger.info(f"Persisted {saved} rows to prioritized_tickers_info_backlog.")
 
-    sample = con.execute("SELECT ticker, score, rank, unique_tag_count, key_metric_count, has_stock_data FROM prioritized_tickers_info_backlog ORDER BY rank LIMIT 15").fetchall()
-    logger.info("Top 15 sample:")
-    for r in sample:
-        logger.info(r)
+        sample = con.execute("SELECT ticker, score, rank, unique_tag_count, key_metric_count, has_stock_data FROM prioritized_tickers_info_backlog ORDER BY rank LIMIT 15").fetchall()
+        logger.info("Top 15 sample:")
+        for r in sample:
+            logger.info(r)
 
-    con.close()
     logger.info("Ticker-info backlog generation complete.")
 
 

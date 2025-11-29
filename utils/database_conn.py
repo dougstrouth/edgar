@@ -10,9 +10,12 @@ configured via the .env file.
 import duckdb
 import os
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Union
 from typing import Dict, Any
+import inspect
+import os
 
 # Assuming the calling script will load dotenv,
 # so os.environ['DB_FILE'] should be available.
@@ -80,7 +83,28 @@ def get_db_connection(
                   return None
 
         # Connect using the string path (works for :memory: and file paths)
-        conn = duckdb.connect(database=db_path_str, read_only=read_only)
+        # Add a small retry/backoff loop to handle transient file-lock conflicts
+        max_retries = 3
+        retry_delay = 1.0
+        last_exc = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                conn = duckdb.connect(database=db_path_str, read_only=read_only)
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                msg = str(e).lower()
+                # If this looks like a file-lock conflict, retry a few times
+                if 'could not set lock' in msg or 'conflicting lock' in msg or 'io error' in msg:
+                    logging.warning(f"Attempt {attempt}/{max_retries}: DuckDB file lock encountered: {e}")
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * attempt)
+                        continue
+                # Not a transient lock or retries exhausted; re-raise afterwards
+                break
+        if last_exc and conn is None:
+            raise last_exc
 
         # --- Apply PRAGMA settings ---
         if conn and pragma_settings:
@@ -133,6 +157,13 @@ class ManagedDatabaseConnection:
             read_only=self._read_only,
             pragma_settings=self._pragma_settings
         )
+        # Diagnostic logging to help trace open connections and potential locks
+        try:
+            caller = inspect.stack()[1]
+            caller_info = f"{caller.filename}:{caller.lineno} in {caller.function}"
+        except Exception:
+            caller_info = "<unknown>"
+        logging.info(f"DB connection opened (pid={os.getpid()}) by {caller_info}")
         # Allow the 'with' block to check if connection is None
         return self.connection
 
@@ -142,6 +173,7 @@ class ManagedDatabaseConnection:
             try:
                 self.connection.close()
                 logging.debug(f"DB connection closed by context manager.")
+                logging.info(f"DB connection closed (pid={os.getpid()})")
             except Exception as e:
                 logging.error(f"Error closing DB connection in context manager: {e}", exc_info=True)
         # Return False to propagate exceptions, True to suppress them

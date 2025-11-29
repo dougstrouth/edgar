@@ -62,33 +62,31 @@ def reset_edgar_pipeline(config: AppConfig, logger):
     # Step 1: Clear EDGAR tables
     logger.info("\n--- Step 1: Clearing EDGAR tables ---")
     try:
-        conn = duckdb.connect(str(config.DB_FILE))
+        with duckdb.connect(str(config.DB_FILE)) as conn:
+            # Get all existing tables
+            existing_tables = conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+            ).fetchall()
+            existing_table_names = {t[0] for t in existing_tables}
+            
+            # Drop EDGAR tables
+            for table in edgar_tables:
+                if table in existing_table_names:
+                    result = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                    row_count = result[0] if result else 0
+                    logger.info(f"Dropping table '{table}' ({row_count:,} rows)...")
+                    conn.execute(f"DROP TABLE IF EXISTS {table}")
+                else:
+                    logger.info(f"Table '{table}' does not exist, skipping...")
+            
+            # Show preserved tables
+            logger.info("\n--- Preserved Tables (Stock Data) ---")
+            for table in preserve_tables:
+                if table in existing_table_names:
+                    result = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                    row_count = result[0] if result else 0
+                    logger.info(f"✓ Keeping '{table}': {row_count:,} rows")
         
-        # Get all existing tables
-        existing_tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
-        ).fetchall()
-        existing_table_names = {t[0] for t in existing_tables}
-        
-        # Drop EDGAR tables
-        for table in edgar_tables:
-            if table in existing_table_names:
-                result = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-                row_count = result[0] if result else 0
-                logger.info(f"Dropping table '{table}' ({row_count:,} rows)...")
-                conn.execute(f"DROP TABLE IF EXISTS {table}")
-            else:
-                logger.info(f"Table '{table}' does not exist, skipping...")
-        
-        # Show preserved tables
-        logger.info("\n--- Preserved Tables (Stock Data) ---")
-        for table in preserve_tables:
-            if table in existing_table_names:
-                result = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-                row_count = result[0] if result else 0
-                logger.info(f"✓ Keeping '{table}': {row_count:,} rows")
-        
-        conn.close()
         logger.info("✓ Database tables cleared successfully")
         
     except Exception as e:

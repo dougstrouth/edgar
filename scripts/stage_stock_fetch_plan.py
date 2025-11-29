@@ -82,23 +82,22 @@ def main() -> None:
     logger.info(f"DB: {db_path}")
     logger.info(f"Limit: {args.limit} stale_days: {args.stale_days} min_records: {args.min_records} end_date: {end_date}")
 
-    con = duckdb.connect(db_path, read_only=False)
+    with duckdb.connect(db_path, read_only=False) as con:
+        # Ensure source table exists
+        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        if 'prioritized_tickers_stock_backlog' not in tables:
+            logger.error('Source table prioritized_tickers_stock_backlog not found. Run generate_prioritized_backlog first.')
+            sys.exit(2)
 
-    # Ensure source table exists
-    tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-    if 'prioritized_tickers_stock_backlog' not in tables:
-        logger.error('Source table prioritized_tickers_stock_backlog not found. Run generate_prioritized_backlog first.')
-        sys.exit(2)
+        # Prepare aggregated stock history view for more current snapshot
+        con.execute("CREATE OR REPLACE TEMP VIEW stock_hist AS SELECT ticker, MAX(date) AS last_date, COUNT(*) AS record_count FROM stock_history GROUP BY ticker")
 
-    # Prepare aggregated stock history view for more current snapshot
-    con.execute("CREATE OR REPLACE TEMP VIEW stock_hist AS SELECT ticker, MAX(date) AS last_date, COUNT(*) AS record_count FROM stock_history GROUP BY ticker")
+        # Parameterize values via Python (DuckDB substitution is simpler inline f-string for clarity)
+        stale_days = args.stale_days
+        min_records = args.min_records
+        end_date_sql = end_date.strftime('%Y-%m-%d')
 
-    # Parameterize values via Python (DuckDB substitution is simpler inline f-string for clarity)
-    stale_days = args.stale_days
-    min_records = args.min_records
-    end_date_sql = end_date.strftime('%Y-%m-%d')
-
-    query = f"""
+        query = f"""
 WITH base AS (
     SELECT p.ticker, p.rank, p.score, p.cik,
            p.unique_tag_count, p.key_metric_count,
@@ -130,25 +129,24 @@ FROM filtered
 ORDER BY rank;
 """
 
-    logger.info('Executing fetch plan creation query...')
-    plan_df = con.execute(query).df()
-    logger.info(f"Plan rows prepared: {len(plan_df)}")
+        logger.info('Executing fetch plan creation query...')
+        plan_df = con.execute(query).df()
+        logger.info(f"Plan rows prepared: {len(plan_df)}")
 
-    con.execute("DROP TABLE IF EXISTS stock_fetch_plan")
-    con.register('plan_df', plan_df)
-    con.execute("CREATE TABLE stock_fetch_plan AS SELECT * FROM plan_df")
+        con.execute("DROP TABLE IF EXISTS stock_fetch_plan")
+        con.register('plan_df', plan_df)
+        con.execute("CREATE TABLE stock_fetch_plan AS SELECT * FROM plan_df")
 
-    # Summary counts
-    summary = con.execute("SELECT status, COUNT(*) FROM stock_fetch_plan GROUP BY status ORDER BY COUNT(*) DESC").fetchall()
-    for status, cnt in summary:
-        logger.info(f"{status}: {cnt}")
+        # Summary counts
+        summary = con.execute("SELECT status, COUNT(*) FROM stock_fetch_plan GROUP BY status ORDER BY COUNT(*) DESC").fetchall()
+        for status, cnt in summary:
+            logger.info(f"{status}: {cnt}")
 
-    sample = con.execute("SELECT ticker, status, start_date, end_date, record_count, last_date, score FROM stock_fetch_plan ORDER BY rank LIMIT 15").fetchall()
-    logger.info('Sample top 15:')
-    for r in sample:
-        logger.info(r)
+        sample = con.execute("SELECT ticker, status, start_date, end_date, record_count, last_date, score FROM stock_fetch_plan ORDER BY rank LIMIT 15").fetchall()
+        logger.info('Sample top 15:')
+        for r in sample:
+            logger.info(r)
 
-    con.close()
     logger.info('Stock fetch plan staging complete.')
 
 
